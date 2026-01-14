@@ -37,7 +37,7 @@ os.makedirs(save_dir, exist_ok=True)
 # Setting
 TOKENIZER_PRETRAINED = "NeoQuasar/Kronos-Tokenizer-base"
 MODEL_PRETRAINED = "NeoQuasar/Kronos-base"
-DEVICE = "cpu"  # "cuda:0"
+DEVICE = "cuda:0"
 MAX_CONTEXT = 512
 LOOKBACK = 400
 PRED_LEN = 120
