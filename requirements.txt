@@ -19,3 +19,6 @@ matplotlib==3.9.3
 xarray
 netCDF4
 openpyxl
+
+pyqlib
+comet_ml

@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import math
 from time import gmtime, strftime
 import logging
 from logging.handlers import RotatingFileHandler
@@ -17,7 +18,7 @@ import datetime
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-sys.path.append('../')
+sys.path.append("/gemini/code/")
 from model import Kronos, KronosTokenizer, KronosPredictor
 from config_loader import CustomFinetuneConfig
 
@@ -241,8 +242,41 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
     use_ddp = dist.is_available() and dist.is_initialized()
     rank = dist.get_rank() if use_ddp else 0
     world_size = dist.get_world_size() if use_ddp else 1
+
+    def get_per_rank_target(total_samples: int):
+        if total_samples is None:
+            return None
+        if total_samples <= 0:
+            return 0
+        base = total_samples // world_size
+        remainder = total_samples % world_size
+        return base + (1 if rank < remainder else 0)
     
     train_loader, val_loader, train_dataset, val_dataset, train_sampler, val_sampler = create_dataloaders(config)
+
+    train_target_total = getattr(config, 'n_train_iter', None)
+    val_target_total = getattr(config, 'n_val_iter', None)
+    train_target_rank = get_per_rank_target(train_target_total)
+    val_target_rank = get_per_rank_target(val_target_total)
+
+    if rank == 0 and train_target_total is not None:
+        logger.info(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+        print(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+    if rank == 0 and val_target_total is not None:
+        logger.info(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
+        print(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.predictor_learning_rate,
@@ -250,10 +284,14 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
         weight_decay=config.adam_weight_decay
     )
     
+    steps_per_epoch = len(train_loader)
+    if train_target_rank is not None:
+        target_steps = math.ceil(train_target_rank / config.batch_size) if train_target_rank > 0 else 1
+        steps_per_epoch = min(steps_per_epoch, target_steps)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=config.predictor_learning_rate,
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=steps_per_epoch,
         epochs=config.basemodel_epochs,
         pct_start=0.03,
         div_factor=10
@@ -278,9 +316,21 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
         epoch_train_loss = 0.0
         train_batches = 0
         
+        train_samples_seen = 0
         for batch_idx, (batch_x, batch_x_stamp) in enumerate(train_loader):
+            if train_target_rank is not None and train_samples_seen >= train_target_rank:
+                break
+
             batch_x = batch_x.to(device, non_blocking=True)
             batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+
+            if train_target_rank is not None:
+                remaining = train_target_rank - train_samples_seen
+                if remaining <= 0:
+                    break
+                if batch_x.size(0) > remaining:
+                    batch_x = batch_x[:remaining]
+                    batch_x_stamp = batch_x_stamp[:remaining]
             
             with torch.no_grad():
                 token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
@@ -299,6 +349,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
             
             epoch_train_loss += loss.item()
             train_batches += 1
+            train_samples_seen += batch_x.size(0)
             
             if (batch_idx_global + 1) % config.log_interval == 0:
                 lr = optimizer.param_groups[0]['lr']
@@ -314,10 +365,22 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
         val_loss = 0.0
         val_batches = 0
         
+        val_samples_seen = 0
         with torch.no_grad():
             for batch_x, batch_x_stamp in val_loader:
+                if val_target_rank is not None and val_samples_seen >= val_target_rank:
+                    break
+
                 batch_x = batch_x.to(device, non_blocking=True)
                 batch_x_stamp = batch_x_stamp.to(device, non_blocking=True)
+
+                if val_target_rank is not None:
+                    remaining = val_target_rank - val_samples_seen
+                    if remaining <= 0:
+                        break
+                    if batch_x.size(0) > remaining:
+                        batch_x = batch_x[:remaining]
+                        batch_x_stamp = batch_x_stamp[:remaining]
                 
                 token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
                 token_in = [token_seq_0[:, :-1], token_seq_1[:, :-1]]
@@ -328,6 +391,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger):
                 
                 val_loss += loss.item()
                 val_batches += 1
+                val_samples_seen += batch_x.size(0)
         
         if use_ddp:
             tensor_sum = torch.tensor([epoch_train_loss, train_batches, val_loss, val_batches], dtype=torch.float64, device=device)

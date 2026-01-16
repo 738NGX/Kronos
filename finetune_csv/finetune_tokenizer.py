@@ -6,6 +6,7 @@ import random
 import numpy as np
 import torch
 import torch.nn.functional as F
+import math
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from time import gmtime, strftime
@@ -15,7 +16,7 @@ from logging.handlers import RotatingFileHandler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-sys.path.append("../")
+sys.path.append("/gemini/code/")
 from model import KronosTokenizer
 from finetune_base_model import CustomKlineDataset
 from config_loader import CustomFinetuneConfig
@@ -153,8 +154,41 @@ def train_tokenizer(model, device, config, save_dir, logger):
     use_ddp = dist.is_available() and dist.is_initialized()
     rank = dist.get_rank() if use_ddp else 0
     world_size = dist.get_world_size() if use_ddp else 1
+
+    def get_per_rank_target(total_samples: int):
+        if total_samples is None:
+            return None
+        if total_samples <= 0:
+            return 0
+        base = total_samples // world_size
+        remainder = total_samples % world_size
+        return base + (1 if rank < remainder else 0)
     
     train_loader, val_loader, train_dataset, val_dataset, train_sampler, val_sampler = create_dataloaders(config)
+
+    train_target_total = getattr(config, 'n_train_iter', None)
+    val_target_total = getattr(config, 'n_val_iter', None)
+    train_target_rank = get_per_rank_target(train_target_total)
+    val_target_rank = get_per_rank_target(val_target_total)
+
+    if rank == 0 and train_target_total is not None:
+        logger.info(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+        print(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+    if rank == 0 and val_target_total is not None:
+        logger.info(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
+        print(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
     
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -162,10 +196,14 @@ def train_tokenizer(model, device, config, save_dir, logger):
         weight_decay=config.adam_weight_decay
     )
     
+    steps_per_epoch = len(train_loader)
+    if train_target_rank is not None:
+        target_steps = math.ceil(train_target_rank / config.batch_size) if train_target_rank > 0 else 1
+        steps_per_epoch = min(steps_per_epoch, target_steps)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=config.tokenizer_learning_rate,
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=steps_per_epoch,
         epochs=config.tokenizer_epochs,
         pct_start=0.03,
         div_factor=10
@@ -189,14 +227,27 @@ def train_tokenizer(model, device, config, save_dir, logger):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         
+        train_samples_seen = 0
         for batch_idx, (ori_batch_x, _) in enumerate(train_loader):
+            if train_target_rank is not None and train_samples_seen >= train_target_rank:
+                break
+
             ori_batch_x = ori_batch_x.squeeze(0).to(device, non_blocking=True)
+
+            if train_target_rank is not None:
+                remaining = train_target_rank - train_samples_seen
+                if remaining <= 0:
+                    break
+                if ori_batch_x.size(0) > remaining:
+                    ori_batch_x = ori_batch_x[:remaining]
             
             current_batch_total_loss = 0.0
-            for j in range(accumulation_steps):
-                start_idx = j * (ori_batch_x.shape[0] // accumulation_steps)
-                end_idx = (j + 1) * (ori_batch_x.shape[0] // accumulation_steps)
-                batch_x = ori_batch_x[start_idx:end_idx]
+            chunks = [
+                chunk for chunk in torch.chunk(ori_batch_x, accumulation_steps)
+                if chunk.numel() > 0
+            ]
+            num_chunks = len(chunks)
+            for batch_x in chunks:
                 
                 zs, bsq_loss, _, _ = (model.module if use_ddp else model)(batch_x)
                 z_pre, z = zs
@@ -206,7 +257,7 @@ def train_tokenizer(model, device, config, save_dir, logger):
                 recon_loss = recon_loss_pre + recon_loss_all
                 loss = (recon_loss + bsq_loss) / 2
                 
-                loss_scaled = loss / accumulation_steps
+                loss_scaled = loss / num_chunks
                 current_batch_total_loss += loss.item()
                 loss_scaled.backward()
             
@@ -216,7 +267,7 @@ def train_tokenizer(model, device, config, save_dir, logger):
             optimizer.zero_grad()
             
             if (batch_idx_global + 1) % config.log_interval == 0:
-                avg_loss = current_batch_total_loss / accumulation_steps
+                avg_loss = current_batch_total_loss / num_chunks
                 lr = optimizer.param_groups[0]["lr"]
                 log_msg = (f"[Epoch {epoch+1}/{config.tokenizer_epochs}, Step {batch_idx+1}/{len(train_loader)}] "
                           f"LR: {lr:.6f}, Loss: {avg_loss:.4f}")
@@ -231,21 +282,34 @@ def train_tokenizer(model, device, config, save_dir, logger):
                 if rank == 0:
                     print(detail_msg)
             
+            train_samples_seen += ori_batch_x.size(0)
             batch_idx_global += 1
         
         model.eval()
         tot_val_loss_sum_rank = 0.0
         val_sample_count_rank = 0
         
+        val_samples_seen = 0
         with torch.no_grad():
             for ori_batch_x, _ in val_loader:
+                if val_target_rank is not None and val_samples_seen >= val_target_rank:
+                    break
+
                 ori_batch_x = ori_batch_x.squeeze(0).to(device, non_blocking=True)
+
+                if val_target_rank is not None:
+                    remaining = val_target_rank - val_samples_seen
+                    if remaining <= 0:
+                        break
+                    if ori_batch_x.size(0) > remaining:
+                        ori_batch_x = ori_batch_x[:remaining]
                 zs, _, _, _ = (model.module if use_ddp else model)(ori_batch_x)
                 _, z = zs
                 val_loss_item = F.mse_loss(z, ori_batch_x)
                 
                 tot_val_loss_sum_rank += val_loss_item.item() * ori_batch_x.size(0)
                 val_sample_count_rank += ori_batch_x.size(0)
+                val_samples_seen += ori_batch_x.size(0)
         
         if use_ddp:
             tensor_sum = torch.tensor([tot_val_loss_sum_rank, val_sample_count_rank], dtype=torch.float64, device=device)

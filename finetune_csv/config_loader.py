@@ -143,12 +143,19 @@ class CustomFinetuneConfig:
         self.log_interval = training_config.get('log_interval', 50)
         self.num_workers = training_config.get('num_workers', 6)
         self.seed = training_config.get('seed', 100)
+        self.n_train_iter = training_config.get('n_train_iter')
+        self.n_val_iter = training_config.get('n_val_iter')
         self.tokenizer_learning_rate = training_config.get('tokenizer_learning_rate', 2e-4)
         self.predictor_learning_rate = training_config.get('predictor_learning_rate', 4e-5)
         self.adam_beta1 = training_config.get('adam_beta1', 0.9)
         self.adam_beta2 = training_config.get('adam_beta2', 0.95)
         self.adam_weight_decay = training_config.get('adam_weight_decay', 0.1)
         self.accumulation_steps = training_config.get('accumulation_steps', 1)
+
+        if self.n_train_iter is None:
+            self.n_train_iter = 2000 * self.batch_size
+        if self.n_val_iter is None:
+            self.n_val_iter = 400 * self.batch_size
         
         model_paths = self.loader.get_model_paths()
         self.exp_name = model_paths.get('exp_name', 'default_experiment')

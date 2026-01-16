@@ -2,6 +2,8 @@ import os
 import sys
 import json
 import time
+import argparse
+import math
 from time import gmtime, strftime
 import torch.distributed as dist
 import torch
@@ -12,7 +14,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import comet_ml
 
 # Ensure project root is in path
-sys.path.append('../')
+sys.path.append("/gemini/code/")
 from config import Config
 from dataset import QlibDataset
 from model.kronos import KronosTokenizer, Kronos
@@ -39,8 +41,8 @@ def create_dataloaders(config: dict, rank: int, world_size: int):
         tuple: (train_loader, val_loader, train_dataset, valid_dataset).
     """
     print(f"[Rank {rank}] Creating distributed dataloaders...")
-    train_dataset = QlibDataset('train')
-    valid_dataset = QlibDataset('val')
+    train_dataset = QlibDataset('train', config=config)
+    valid_dataset = QlibDataset('val', config=config)
     print(f"[Rank {rank}] Train dataset size: {len(train_dataset)}, Validation dataset size: {len(valid_dataset)}")
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -61,6 +63,15 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
     """
     The main training and validation loop for the predictor.
     """
+    def get_per_rank_target(total_samples: int):
+        if total_samples is None:
+            return None
+        if total_samples <= 0:
+            return 0
+        base = total_samples // world_size
+        remainder = total_samples % world_size
+        return base + (1 if rank < remainder else 0)
+
     start_time = time.time()
     if rank == 0:
         effective_bs = config['batch_size'] * world_size
@@ -68,15 +79,37 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
 
     train_loader, val_loader, train_dataset, valid_dataset = create_dataloaders(config, rank, world_size)
 
+    train_target_total = config.get('n_train_iter')
+    val_target_total = config.get('n_val_iter')
+    train_target_rank = get_per_rank_target(train_target_total)
+    val_target_rank = get_per_rank_target(val_target_total)
+
+    if rank == 0 and train_target_total is not None:
+        print(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+    if rank == 0 and val_target_total is not None:
+        print(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config['predictor_learning_rate'],
         betas=(config['adam_beta1'], config['adam_beta2']),
         weight_decay=config['adam_weight_decay']
     )
+    steps_per_epoch = len(train_loader)
+    if train_target_rank is not None:
+        steps_per_epoch = min(
+            steps_per_epoch,
+            math.ceil(train_target_rank / config['batch_size']) if train_target_rank > 0 else 0
+        )
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=config['predictor_learning_rate'],
-        steps_per_epoch=len(train_loader), epochs=config['epochs'],
+        steps_per_epoch=steps_per_epoch, epochs=config['epochs'],
         pct_start=0.03, div_factor=10
     )
 
@@ -92,9 +125,21 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
         train_dataset.set_epoch_seed(epoch_idx * 10000 + rank)
         valid_dataset.set_epoch_seed(0)
 
+        train_samples_seen = 0
         for i, (batch_x, batch_x_stamp) in enumerate(train_loader):
+            if train_target_rank is not None and train_samples_seen >= train_target_rank:
+                break
+
             batch_x = batch_x.squeeze(0).to(device, non_blocking=True)
             batch_x_stamp = batch_x_stamp.squeeze(0).to(device, non_blocking=True)
+
+            if train_target_rank is not None:
+                remaining = train_target_rank - train_samples_seen
+                if remaining <= 0:
+                    break
+                if batch_x.size(0) > remaining:
+                    batch_x = batch_x[:remaining]
+                    batch_x_stamp = batch_x_stamp[:remaining]
 
             # Tokenize input data on-the-fly
             with torch.no_grad():
@@ -129,16 +174,29 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 logger.log_metric('train_S2_loss_each_batch', s2_loss.item(), step=batch_idx_global)
                 logger.log_metric('predictor_learning_rate', lr, step=batch_idx_global)
 
+            train_samples_seen += batch_x.size(0)
             batch_idx_global += 1
 
         # --- Validation Loop ---
         model.eval()
         tot_val_loss_sum_rank = 0.0
         val_batches_processed_rank = 0
+        val_samples_seen = 0
         with torch.no_grad():
             for batch_x, batch_x_stamp in val_loader:
+                if val_target_rank is not None and val_samples_seen >= val_target_rank:
+                    break
+
                 batch_x = batch_x.squeeze(0).to(device, non_blocking=True)
                 batch_x_stamp = batch_x_stamp.squeeze(0).to(device, non_blocking=True)
+
+                if val_target_rank is not None:
+                    remaining = val_target_rank - val_samples_seen
+                    if remaining <= 0:
+                        break
+                    if batch_x.size(0) > remaining:
+                        batch_x = batch_x[:remaining]
+                        batch_x_stamp = batch_x_stamp[:remaining]
 
                 token_seq_0, token_seq_1 = tokenizer.encode(batch_x, half=True)
                 token_in = [token_seq_0[:, :-1], token_seq_1[:, :-1]]
@@ -149,6 +207,7 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
 
                 tot_val_loss_sum_rank += val_loss.item()
                 val_batches_processed_rank += 1
+                val_samples_seen += batch_x.size(0)
 
         # Reduce validation metrics
         val_loss_sum_tensor = torch.tensor(tot_val_loss_sum_rank, device=device)
@@ -171,6 +230,8 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 best_val_loss = avg_val_loss
                 save_path = f"{save_dir}/checkpoints/best_model"
                 model.module.save_pretrained(save_path)
+                if os.path.exists("/gemini/output/"):
+                    model.module.save_pretrained("/gemini/output/best_model_predictor")
                 print(f"Best model saved to {save_path} (Val Loss: {best_val_loss:.4f})")
 
         dist.barrier()
@@ -236,9 +297,12 @@ def main(config: dict):
 
 
 if __name__ == '__main__':
-    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_predictor.py
+    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_predictor.py --config path/to/config.yaml
     if "WORLD_SIZE" not in os.environ:
         raise RuntimeError("This script must be launched with `torchrun`.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
+    args = parser.parse_args()
 
-    config_instance = Config()
+    config_instance = Config(args.config)
     main(config_instance.__dict__)

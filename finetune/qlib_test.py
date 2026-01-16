@@ -236,7 +236,7 @@ def collate_fn_for_inference(batch):
     return x_batch, x_stamp_batch, y_stamp_batch, list(symbols), list(timestamps)
 
 
-def generate_predictions(config: dict, test_data: dict) -> dict[str, pd.DataFrame]:
+def generate_predictions(config: dict, test_data: dict, base_config: Config) -> dict[str, pd.DataFrame]:
     """
     Runs inference on the test dataset to generate prediction signals.
 
@@ -252,7 +252,7 @@ def generate_predictions(config: dict, test_data: dict) -> dict[str, pd.DataFram
     device = torch.device(config['device'])
 
     # Use the Dataset and DataLoader for efficient batching and processing
-    dataset = QlibTestDataset(data=test_data, config=Config())
+    dataset = QlibTestDataset(data=test_data, config=base_config)
     loader = DataLoader(
         dataset,
         batch_size=config['batch_size'] // config['sample_count'],
@@ -303,10 +303,11 @@ def main():
     """Main function to set up config, run inference, and execute backtesting."""
     parser = argparse.ArgumentParser(description="Run Kronos Inference and Backtesting")
     parser.add_argument("--device", type=str, default="cuda:1", help="Device for inference (e.g., 'cuda:0', 'cpu')")
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
     args = parser.parse_args()
 
     # --- 1. Configuration Setup ---
-    base_config = Config()
+    base_config = Config(args.config)
 
     # Create a dedicated dictionary for this run's configuration
     run_config = {
@@ -338,7 +339,7 @@ def main():
         test_data = pickle.load(f)
     print(test_data)
     # --- 3. Generate Predictions ---
-    model_preds = generate_predictions(run_config, test_data)
+    model_preds = generate_predictions(run_config, test_data, base_config)
 
     # --- 4. Save Predictions ---
     save_dir = os.path.join(run_config['result_save_path'], run_config['result_name'])

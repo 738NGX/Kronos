@@ -4,6 +4,7 @@ import json
 import time
 from time import gmtime, strftime
 import argparse
+import math
 import datetime
 import torch.distributed as dist
 import torch
@@ -15,7 +16,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import comet_ml
 
 # Ensure project root is in path
-sys.path.append("../")
+sys.path.append("/gemini/code/")
 from config import Config
 from dataset import QlibDataset
 from model.kronos import KronosTokenizer
@@ -42,8 +43,8 @@ def create_dataloaders(config: dict, rank: int, world_size: int):
         tuple: A tuple containing (train_loader, val_loader, train_dataset, valid_dataset).
     """
     print(f"[Rank {rank}] Creating distributed dataloaders...")
-    train_dataset = QlibDataset('train')
-    valid_dataset = QlibDataset('val')
+    train_dataset = QlibDataset('train', config=config)
+    valid_dataset = QlibDataset('val', config=config)
     print(f"[Rank {rank}] Train dataset size: {len(train_dataset)}, Validation dataset size: {len(valid_dataset)}")
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -87,6 +88,15 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
     Returns:
         tuple: A tuple containing the trained model and a dictionary of results.
     """
+    def get_per_rank_target(total_samples: int):
+        if total_samples is None:
+            return None
+        if total_samples <= 0:
+            return 0
+        base = total_samples // world_size
+        remainder = total_samples % world_size
+        return base + (1 if rank < remainder else 0)
+
     start_time = time.time()
     if rank == 0:
         effective_bs = config['batch_size'] * world_size * config['accumulation_steps']
@@ -95,16 +105,36 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
 
     train_loader, val_loader, train_dataset, valid_dataset = create_dataloaders(config, rank, world_size)
 
+    train_target_total = config.get('n_train_iter')
+    val_target_total = config.get('n_val_iter')
+    train_target_rank = get_per_rank_target(train_target_total)
+    val_target_rank = get_per_rank_target(val_target_total)
+
+    if rank == 0 and train_target_total is not None:
+        print(
+            f"Using per-epoch train sample cap: {train_target_total} "
+            f"(per-rank target: {train_target_rank})"
+        )
+    if rank == 0 and val_target_total is not None:
+        print(
+            f"Using per-epoch val sample cap: {val_target_total} "
+            f"(per-rank target: {val_target_rank})"
+        )
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config['tokenizer_learning_rate'],
         weight_decay=config['adam_weight_decay']
     )
 
+    steps_per_epoch = len(train_loader)
+    if train_target_rank is not None:
+        target_steps = math.ceil(train_target_rank / config['batch_size']) if train_target_rank > 0 else 1
+        steps_per_epoch = min(steps_per_epoch, target_steps)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer=optimizer,
         max_lr=config['tokenizer_learning_rate'],
-        steps_per_epoch=len(train_loader),
+        steps_per_epoch=steps_per_epoch,
         epochs=config['epochs'],
         pct_start=0.03,
         div_factor=10
@@ -123,15 +153,28 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
         train_dataset.set_epoch_seed(epoch_idx * 10000 + rank)
         valid_dataset.set_epoch_seed(0)  # Keep validation sampling consistent
 
+        train_samples_seen = 0
         for i, (ori_batch_x, _) in enumerate(train_loader):
+            if train_target_rank is not None and train_samples_seen >= train_target_rank:
+                break
+
             ori_batch_x = ori_batch_x.squeeze(0).to(device, non_blocking=True)
+
+            if train_target_rank is not None:
+                remaining = train_target_rank - train_samples_seen
+                if remaining <= 0:
+                    break
+                if ori_batch_x.size(0) > remaining:
+                    ori_batch_x = ori_batch_x[:remaining]
 
             # --- Gradient Accumulation Loop ---
             current_batch_total_loss = 0.0
-            for j in range(config['accumulation_steps']):
-                start_idx = j * (ori_batch_x.shape[0] // config['accumulation_steps'])
-                end_idx = (j + 1) * (ori_batch_x.shape[0] // config['accumulation_steps'])
-                batch_x = ori_batch_x[start_idx:end_idx]
+            chunks = [
+                chunk for chunk in torch.chunk(ori_batch_x, config['accumulation_steps'])
+                if chunk.numel() > 0
+            ]
+            num_chunks = len(chunks)
+            for batch_x in chunks:
 
                 # Forward pass
                 zs, bsq_loss, _, _ = model(batch_x)
@@ -143,7 +186,7 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
                 recon_loss = recon_loss_pre + recon_loss_all
                 loss = (recon_loss + bsq_loss) / 2  # Assuming w_1=w_2=1
 
-                loss_scaled = loss / config['accumulation_steps']
+                loss_scaled = loss / num_chunks
                 current_batch_total_loss += loss.item()
                 loss_scaled.backward()
 
@@ -155,34 +198,47 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
 
             # --- Logging (Master Process Only) ---
             if rank == 0 and (batch_idx_global_train + 1) % config['log_interval'] == 0:
-                avg_loss = current_batch_total_loss / config['accumulation_steps']
+                avg_loss = current_batch_total_loss / num_chunks
                 print(
                     f"[Rank {rank}, Epoch {epoch_idx + 1}/{config['epochs']}, Step {i + 1}/{len(train_loader)}] "
                     f"LR {optimizer.param_groups[0]['lr']:.6f}, Loss: {avg_loss:.4f}"
                 )
             if rank == 0 and logger:
-                avg_loss = current_batch_total_loss / config['accumulation_steps']
+                avg_loss = current_batch_total_loss / num_chunks
                 logger.log_metric('train_tokenizer_loss_batch', avg_loss, step=batch_idx_global_train)
                 logger.log_metric(f'train_vqvae_vq_loss_each_batch', bsq_loss.item(), step=batch_idx_global_train)
                 logger.log_metric(f'train_recon_loss_pre_each_batch', recon_loss_pre.item(), step=batch_idx_global_train)
                 logger.log_metric(f'train_recon_loss_each_batch', recon_loss_all.item(), step=batch_idx_global_train)
                 logger.log_metric('tokenizer_learning_rate', optimizer.param_groups[0]["lr"], step=batch_idx_global_train)
 
+            train_samples_seen += ori_batch_x.size(0)
             batch_idx_global_train += 1
 
         # --- Validation Loop ---
         model.eval()
         tot_val_loss_sum_rank = 0.0
         val_sample_count_rank = 0
+        val_samples_seen = 0
         with torch.no_grad():
             for ori_batch_x, _ in val_loader:
+                if val_target_rank is not None and val_samples_seen >= val_target_rank:
+                    break
+
                 ori_batch_x = ori_batch_x.squeeze(0).to(device, non_blocking=True)
+
+                if val_target_rank is not None:
+                    remaining = val_target_rank - val_samples_seen
+                    if remaining <= 0:
+                        break
+                    if ori_batch_x.size(0) > remaining:
+                        ori_batch_x = ori_batch_x[:remaining]
                 zs, _, _, _ = model(ori_batch_x)
                 _, z = zs
                 val_loss_item = F.mse_loss(z, ori_batch_x)
 
                 tot_val_loss_sum_rank += val_loss_item.item() * ori_batch_x.size(0)
                 val_sample_count_rank += ori_batch_x.size(0)
+                val_samples_seen += ori_batch_x.size(0)
 
         # Reduce validation losses from all processes
         val_loss_sum_tensor = torch.tensor(tot_val_loss_sum_rank, device=device)
@@ -205,6 +261,8 @@ def train_model(model, device, config, save_dir, logger, rank, world_size):
                 best_val_loss = avg_val_loss
                 save_path = f"{save_dir}/checkpoints/best_model"
                 model.module.save_pretrained(save_path)
+                if os.path.exists("/gemini/output/"):
+                    model.module.save_pretrained("/gemini/output/best_model_tokenizer")
                 print(f"Best model saved to {save_path} (Val Loss: {best_val_loss:.4f})")
                 if logger:
                     logger.log_model("best_model", save_path)
@@ -273,9 +331,12 @@ def main(config: dict):
 
 
 if __name__ == '__main__':
-    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_tokenizer.py
+    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_tokenizer.py --config path/to/config.yaml
     if "WORLD_SIZE" not in os.environ:
         raise RuntimeError("This script must be launched with `torchrun`.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
+    args = parser.parse_args()
 
-    config_instance = Config()
+    config_instance = Config(args.config)
     main(config_instance.__dict__)

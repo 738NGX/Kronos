@@ -1,0 +1,75 @@
+# 数据与特征
+data:
+  qlib_data_path: "/gemini/data-1/qlib/qlib_data/cn_data"
+  tushare_data_path: "/gemini/data-2/Tushare/"
+  instrument: "csi300"
+  dataset_begin_time: "2010-01-01"
+  dataset_end_time: "2025-09-30"
+  lookback_window: 250
+  predict_window: 5
+  max_context: 512
+  feature_list: [open, high, low, close, volume, amount]
+  time_feature_list: [minute, hour, weekday, day, month]
+
+# 数据集切分与路径
+dataset:
+  train_time_range: ["2010-01-01", "2022-12-31"]
+  val_time_range: ["2023-01-01", "2024-12-31"]
+  test_time_range: ["2023-01-01", "2025-09-30"]
+  backtest_time_range: ["2024-06-01", "2025-09-30"]
+  dataset_path: "/gemini/data-1/processed_datasets_csi300"
+
+# 训练参数
+training:
+  clip: 5.0
+  epochs: 3
+  log_interval: 50
+  batch_size: 128
+  n_train_iter: 80000
+  n_val_iter: 16000
+  tokenizer_learning_rate: 0.0002
+  predictor_learning_rate: 0.000005
+  accumulation_steps: 1
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  adam_weight_decay: 0.2
+  seed: 100
+  num_workers: 6
+
+# 实验与日志
+experiment:
+  use_comet: false
+  comet_config:
+    api_key: ""
+    project_name: ""
+    workspace: ""
+  comet_tag: ""
+  comet_name: ""
+
+# 保存路径
+paths:
+  save_path: "/gemini/data-1/outputs/csi300_models_v2"
+  tokenizer_save_folder_name: "finetune_tokenizer"
+  predictor_save_folder_name: "finetune_predictor"
+  backtest_save_folder_name: "finetune_backtest"
+  backtest_result_path: "/gemini/data-1/outputs/csi300_backtest_results"
+
+# 模型路径
+model:
+  pretrained_repo: "/gemini/data-1"
+  pretrained_tokenizer_path: "{pretrained_repo}/Kronos-Tokenizer-base"
+  pretrained_predictor_path: "{pretrained_repo}/Kronos-base"
+  finetuned_tokenizer_path: "{save_path}/{tokenizer_save_folder_name}/checkpoints/best_model"
+  finetuned_predictor_path: "{save_path}/{predictor_save_folder_name}/checkpoints/best_model"
+
+# 回测参数
+backtest:
+  backtest_n_symbol_hold: 50
+  backtest_n_symbol_drop: 5
+  backtest_hold_thresh: 5
+  inference_T: 0.6
+  inference_top_p: 0.9
+  inference_top_k: 0
+  inference_sample_count: 5
+  backtest_batch_size: 1000
+  backtest_benchmark: null
