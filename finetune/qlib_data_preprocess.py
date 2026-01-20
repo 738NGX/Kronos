@@ -42,7 +42,7 @@ class QlibDataPreprocessor:
 
         # Check if start_index lookbackw_window will cause negative index
         adjusted_start_index = max(start_index - self.config.lookback_window, 0)
-        real_start_time = cal[adjusted_start_index]
+        real_start_time = pd.Timestamp(cal[adjusted_start_index])
 
         # Check if end_index exceeds the range of the array
         if end_index >= len(cal):
@@ -52,12 +52,64 @@ class QlibDataPreprocessor:
 
         # Check if end_index+predictw_window will exceed the range of the array
         adjusted_end_index = min(end_index + self.config.predict_window, len(cal) - 1)
-        real_end_time = cal[adjusted_end_index]
+        real_end_time = pd.Timestamp(cal[adjusted_end_index])
 
-        # Load data using Qlib's data loader.
-        data_df = QlibDataLoader(config=data_fields_qlib).load(
-            self.config.instrument, real_start_time, real_end_time
-        )
+        # --- Hybrid Loading Logic ---
+        # The split date for CSI1000 availability
+        SPLIT_DATE = pd.Timestamp("2014-10-31")
+
+        data_df = None
+        
+        # Trigger Condition: Instrument is csi1000 AND start time is before the official release
+        if self.config.instrument == 'csi1000' and real_start_time < SPLIT_DATE:
+            print("⚠️ Detected request for CSI1000 prior to 2014.")
+            print("   -> Activating Hybrid Mode: splicing 'Proxy (Market-300-500)' and 'Real CSI1000'.")
+
+            # Define splice points
+            # Phase 1 ends at SPLIT_DATE
+            # Phase 2 starts immediately after
+            phase1_end = min(SPLIT_DATE, real_end_time)
+            
+            # --- Phase 1: Construct Proxy (Start -> 2014-10-31) ---
+            print(f"   [Phase 1] Loading Proxy Data ({real_start_time.date()} to {phase1_end.date()})...")
+            
+            # Load Market, 300, and 500
+            # Note: We only need indices for 300 and 500 to perform exclusion
+            loader_all = QlibDataLoader(config=data_fields_qlib)
+            df_all = loader_all.load('all', real_start_time, phase1_end)
+            
+            loader_filter = QlibDataLoader(config=['$close']) # Config doesn't matter, we just need the index
+            df_300 = loader_filter.load('csi300', real_start_time, phase1_end)
+            df_500 = loader_filter.load('csi500', real_start_time, phase1_end)
+            
+            # Perform Set Difference: All - (300 U 500)
+            # Utilizing Pandas Index difference for speed
+            exclude_idx = df_300.index.union(df_500.index)
+            valid_idx = df_all.index.difference(exclude_idx)
+            
+            df_proxy = df_all.loc[valid_idx]
+            print(f"   -> Phase 1 loaded. Raw: {len(df_all)}, Filtered (Proxy): {len(df_proxy)}")
+            
+            # --- Phase 2: Load Real CSI1000 (2014-11-01 -> End) ---
+            df_real = pd.DataFrame()
+            if real_end_time > SPLIT_DATE:
+                phase2_start = SPLIT_DATE + pd.Timedelta(days=1)
+                print(f"   [Phase 2] Loading Real Data ({phase2_start.date()} to {real_end_time.date()})...")
+                df_real = QlibDataLoader(config=data_fields_qlib).load('csi1000', phase2_start, real_end_time)
+                print(f"   -> Phase 2 loaded: {len(df_real)} records.")
+            
+            # Merge
+            data_df = pd.concat([df_proxy, df_real])
+            
+            # Sort to ensure time order (crucial for time-series)
+            data_df = data_df.sort_index()
+
+        else:
+            # Standard Loading Logic (Original)
+            print(f"   -> Standard Mode: Loading {self.config.instrument} directly.")
+            data_df = QlibDataLoader(config=data_fields_qlib).load(
+                self.config.instrument, real_start_time, real_end_time
+            )
         data_df = data_df.stack().unstack(level=1)  # Reshape for easier access.
 
         symbol_list = list(data_df.columns)

@@ -15,7 +15,7 @@ class Config:
 
         # Overall time range for data loading from Qlib.
         self.dataset_begin_time = "2010-01-01" 
-        self.dataset_end_time = '2025-09-30' # 覆盖到报告回测期结束
+        self.dataset_end_time = '2025-09-30'
 
         # Sliding window parameters for creating samples.
         self.lookback_window = 250  # Number of past time steps for input.
@@ -73,25 +73,16 @@ class Config:
         # Experiment Logging & Saving
         # =================================================================
         self.use_comet = False # Set to False if you don't want to use Comet ML
-        self.comet_config = {
-            # It is highly recommended to load secrets from environment variables
-            # for security purposes. Example: os.getenv("COMET_API_KEY")
-            "api_key": "YOUR_COMET_API_KEY",
-            "project_name": "Kronos-Finetune-Demo",
-            "workspace": "your_comet_workspace" # TODO: Change to your Comet ML workspace name
-        }
-        self.comet_tag = 'csi1000_reproduce'
-        self.comet_name = 'csi1000_reproduce'
 
         # Base directory for saving model checkpoints and results.
         # Using a general 'outputs' directory is a common practice.
-        self.save_path = "/gemini/code/outputs/models_csi1000"
+        self.save_path = "/gemini/code/outputs/csi1000_models"
         self.tokenizer_save_folder_name = 'finetune_tokenizer'
         self.predictor_save_folder_name = 'finetune_predictor'
         self.backtest_save_folder_name = 'finetune_backtest'
 
         # Path for backtesting results.
-        self.backtest_result_path = "/gemini/code/outputs/backtest_results"
+        self.backtest_result_path = "/gemini/code/outputs/csi1000_backtest_results"
 
         # =================================================================
         # Model & Checkpoint Paths
