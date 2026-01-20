@@ -67,7 +67,7 @@ class Config:
         self.adam_weight_decay = 0.1
 
         # Miscellaneous
-        self.seed = 100 # # Global random seed for reproducibility.
+        self.seed = 100 # Global random seed for reproducibility.
 
         # =================================================================
         # Experiment Logging & Saving
