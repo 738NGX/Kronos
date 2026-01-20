@@ -10,16 +10,16 @@ class Config:
         # Data & Feature Parameters
         # =================================================================
         # TODO: Update this path to your Qlib data directory.
-        self.qlib_data_path = "~/.qlib/qlib_data/cn_data"
-        self.instrument = 'csi300'
+        self.qlib_data_path = "/root/.qlib/qlib_data/cn_data"
+        self.instrument = 'csi1000'
 
         # Overall time range for data loading from Qlib.
-        self.dataset_begin_time = "2011-01-01"
-        self.dataset_end_time = '2025-06-05'
+        self.dataset_begin_time = "2010-01-01" 
+        self.dataset_end_time = '2025-09-30' # 覆盖到报告回测期结束
 
         # Sliding window parameters for creating samples.
-        self.lookback_window = 90  # Number of past time steps for input.
-        self.predict_window = 10  # Number of future time steps for prediction.
+        self.lookback_window = 250  # Number of past time steps for input.
+        self.predict_window = 5  # Number of future time steps for prediction.
         self.max_context = 512  # Maximum context length for the model.
 
         # Features to be used from the raw data.
@@ -32,31 +32,31 @@ class Config:
         # =================================================================
         # Note: The validation/test set starts earlier than the training/validation set ends
         # to account for the `lookback_window`.
-        self.train_time_range = ["2011-01-01", "2022-12-31"]
-        self.val_time_range = ["2022-09-01", "2024-06-30"]
-        self.test_time_range = ["2024-04-01", "2025-06-05"]
-        self.backtest_time_range = ["2024-07-01", "2025-06-05"]
+        self.train_time_range = ["2010-01-01", "2022-12-31"]
+        self.val_time_range = ["2023-01-01", "2024-12-31"]
+        self.test_time_range = ["2023-01-01", "2025-09-30"]
+        self.backtest_time_range = ["2024-06-01", "2025-09-30"]
 
         # TODO: Directory to save the processed, pickled datasets.
-        self.dataset_path = "./data/processed_datasets"
+        self.dataset_path = "/gemini/code/data/processed_datasets_csi1000"
 
         # =================================================================
         # Training Hyperparameters
         # =================================================================
         self.clip = 5.0  # Clipping value for normalized data to prevent outliers.
 
-        self.epochs = 30
-        self.log_interval = 100  # Log training status every N batches.
-        self.batch_size = 50  # Batch size per GPU.
+        self.epochs = 10
+        self.log_interval = 50
+        self.batch_size = 30
 
         # Number of samples to draw for one "epoch" of training/validation.
         # This is useful for large datasets where a true epoch is too long.
-        self.n_train_iter = 2000 * self.batch_size
-        self.n_val_iter = 400 * self.batch_size
+        self.n_train_iter = 2000 * self.batch_size  # 60000
+        self.n_val_iter = 400 * self.batch_size     # 12000
 
         # Learning rates for different model components.
         self.tokenizer_learning_rate = 2e-4
-        self.predictor_learning_rate = 4e-5
+        self.predictor_learning_rate = 1e-5
 
         # Gradient accumulation to simulate a larger batch size.
         self.accumulation_steps = 1
@@ -67,12 +67,12 @@ class Config:
         self.adam_weight_decay = 0.1
 
         # Miscellaneous
-        self.seed = 100  # Global random seed for reproducibility.
+        self.seed = 42 # # Global random seed for reproducibility.
 
         # =================================================================
         # Experiment Logging & Saving
         # =================================================================
-        self.use_comet = True # Set to False if you don't want to use Comet ML
+        self.use_comet = False # Set to False if you don't want to use Comet ML
         self.comet_config = {
             # It is highly recommended to load secrets from environment variables
             # for security purposes. Example: os.getenv("COMET_API_KEY")
@@ -80,26 +80,25 @@ class Config:
             "project_name": "Kronos-Finetune-Demo",
             "workspace": "your_comet_workspace" # TODO: Change to your Comet ML workspace name
         }
-        self.comet_tag = 'finetune_demo'
-        self.comet_name = 'finetune_demo'
+        self.comet_tag = 'csi1000_reproduce'
+        self.comet_name = 'csi1000_reproduce'
 
         # Base directory for saving model checkpoints and results.
         # Using a general 'outputs' directory is a common practice.
-        self.save_path = "./outputs/models"
-        self.tokenizer_save_folder_name = 'finetune_tokenizer_demo'
-        self.predictor_save_folder_name = 'finetune_predictor_demo'
-        self.backtest_save_folder_name = 'finetune_backtest_demo'
+        self.save_path = "/gemini/code/outputs/models_csi1000"
+        self.tokenizer_save_folder_name = 'finetune_tokenizer'
+        self.predictor_save_folder_name = 'finetune_predictor'
+        self.backtest_save_folder_name = 'finetune_backtest'
 
         # Path for backtesting results.
-        self.backtest_result_path = "./outputs/backtest_results"
+        self.backtest_result_path = "/gemini/code/outputs/backtest_results"
 
         # =================================================================
         # Model & Checkpoint Paths
         # =================================================================
-        # TODO: Update these paths to your pretrained model locations.
         # These can be local paths or Hugging Face Hub model identifiers.
-        self.pretrained_tokenizer_path = "path/to/your/Kronos-Tokenizer-base"
-        self.pretrained_predictor_path = "path/to/your/Kronos-small"
+        self.pretrained_tokenizer_path = "NeoQuasar/Kronos-Tokenizer-base"
+        self.pretrained_predictor_path = "NeoQuasar/Kronos-base"
 
         # Paths to the fine-tuned models, derived from the save_path.
         # These will be generated automatically during training.
