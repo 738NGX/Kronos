@@ -20,8 +20,8 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 # ================= Configuration =================
 CONFIG = {
     # 路径配置：直接指向 safetensors
-    "model_path": "/gemini/data-1/csi1000_finetune/finetuned_model/finetune_predictor/checkpoints/best_model", # 假设该目录下有 model.safetensors
-    "tokenizer_path": "/gemini/data-1/csi1000_finetune/finetuned_model/finetune_tokenizer/checkpoints/best_model", 
+    "model_path": "/gemini/data-1/csi1000_finetune/finetune_predictor/checkpoints/best_model", # 假设该目录下有 model.safetensors
+    "tokenizer_path": "/gemini/data-1/csi1000_finetune/finetune_tokenizer/checkpoints/best_model", 
     
     # 推理参数
     "lookback": 250,          # 必须与微调时的 context length 一致
@@ -161,7 +161,7 @@ def run_inference():
     tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
     # 注意：HuggingFace Transformer 库通常会自动识别 safetensors，
     # 但如果通过 use_safetensors=True 强制指定会更稳妥
-    model = Kronos.from_pretrained(CONFIG['model_path'], use_safetensors=True)
+    model = Kronos.from_pretrained(CONFIG['model_path'])
     
     # 初始化预测器
     predictor = KronosPredictor(
