@@ -1,5 +1,6 @@
 #!/bin/bash
 pip install -r requirements.txt
+pt update && apt install fonts-noto-cjk
 
 # Download and extract Qlib data
 wget https://github.com/chenditc/investment_data/releases/latest/download/qlib_bin.tar.gz

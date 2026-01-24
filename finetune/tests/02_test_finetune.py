@@ -57,26 +57,46 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ================= Data Processing =================
 
 def get_index_data(symbol_code, name):
-    """直接获取Akshare数据，不做任何错误处理"""
     print(f"📥 Fetching data for {name} ({symbol_code})...")
     
-    # 获取数据
-    df = ak.stock_zh_index_daily(symbol=symbol_code)
+    # === 特例处理：中证2000 (932000) ===
+    # 原因：stock_zh_index_daily 接口太老，收录不到 2023 年发布的中证2000
+    if "932000" in symbol_code:
+        import re
+        # 使用 ak.index_zh_a_hist (东方财富源) 获取中证2000
+        clean_symbol = re.sub(r"[^0-9]", "", symbol_code) # 去掉 sh 前缀
+        df = ak.index_zh_a_hist(symbol=clean_symbol, period="daily")
+        
+        # 东方财富返回的是中文列名，手动映射成和你下面逻辑一致的英文
+        df = df.rename(columns={
+            "日期": "date", "开盘": "open", "最高": "high", 
+            "最低": "low", "收盘": "close", "成交量": "volume"
+        })
+        
+    # === 原有逻辑：处理其他所有指数 ===
+    else:
+        # 你的原始代码，不做任何改动
+        df = ak.stock_zh_index_daily(symbol=symbol_code)
+        
+        # 原始代码的重命名逻辑
+        df = df.rename(columns={
+            "date": "date", "open": "open", "high": "high", 
+            "low": "low", "close": "close", "volume": "volume"
+        })
+
+    # === 公共后处理 (保持不变) ===
     
-    # 标准化列名
-    df = df.rename(columns={
-        "date": "date", "open": "open", "high": "high", 
-        "low": "low", "close": "close", "volume": "volume"
-    })
+    # Handle 'amount' (turnover)
+    if "amount" not in df.columns:
+        df["amount"] = df["close"] * df["volume"]
     
-    # 确保时间类型
     df["date"] = pd.to_datetime(df["date"])
     df = df.sort_values("date").reset_index(drop=True)
     
-    # 类型转换
-    cols = ["open", "high", "low", "close", "volume"]
+    # Type conversion
+    cols = ["open", "high", "low", "close", "volume"] # amount 可能是计算出来的，先不强转以免报错
     for c in cols:
-        df[c] = pd.to_numeric(df[c])
+        df[c] = pd.to_numeric(df[c], errors="coerce")
         
     return df
 
