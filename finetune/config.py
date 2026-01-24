@@ -77,7 +77,7 @@ class Config:
 
         # Base directory for saving model checkpoints and results.
         # Using a general 'outputs' directory is a common practice.
-        self.save_path = "/gemini/output"
+        self.save_path = "/gemini/data-1/outputs/csi1000_models"
         self.tokenizer_save_folder_name = 'finetune_tokenizer'
         self.predictor_save_folder_name = 'finetune_predictor'
         self.backtest_save_folder_name = 'finetune_backtest'
