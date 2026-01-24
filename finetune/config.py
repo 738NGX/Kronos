@@ -89,8 +89,8 @@ class Config:
         # Model & Checkpoint Paths
         # =================================================================
         # These can be local paths or Hugging Face Hub model identifiers.
-        self.pretrained_tokenizer_path = "NeoQuasar/Kronos-Tokenizer-base"
-        self.pretrained_predictor_path = "NeoQuasar/Kronos-base"
+        self.pretrained_tokenizer_path = "/gemini/data-1/Kronos-Tokenizer-base"
+        self.pretrained_predictor_path = "/gemini/data-1/Kronos-base"
 
         # Paths to the fine-tuned models, derived from the save_path.
         # These will be generated automatically during training.
