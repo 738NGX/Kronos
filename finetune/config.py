@@ -10,7 +10,8 @@ class Config:
         # Data & Feature Parameters
         # =================================================================
         # TODO: Update this path to your Qlib data directory.
-        self.qlib_data_path = "/root/.qlib/qlib_data/cn_data"
+        self.qlib_data_path = "/gemini/data-1/qlib/qlib_data/cn_data"
+        self.tushare_data_path = "/gemini/data-2/Tushare/"
         self.instrument = 'csi1000'
 
         # Overall time range for data loading from Qlib.
