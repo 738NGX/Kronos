@@ -116,8 +116,10 @@ class QlibDataPreprocessor:
             
             # 最终字段筛选，严格对齐 Config.feature_list
             symbol_df = full_df[mask][self.config.feature_list].dropna()
-            
+
             if len(symbol_df) >= self.config.lookback_window + self.config.predict_window + 1:
+                # 强制将索引同步到列中，确保与 Qlib 脚本产出的格式 100% 一致
+                symbol_df['datetime'] = symbol_df.index 
                 self.data[ticker] = symbol_df
 
     def prepare_dataset(self):
