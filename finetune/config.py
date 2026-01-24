@@ -39,7 +39,7 @@ class Config:
         self.backtest_time_range = ["2024-06-01", "2025-09-30"]
 
         # TODO: Directory to save the processed, pickled datasets.
-        self.dataset_path = "/gemini/code/data/processed_datasets_csi1000"
+        self.dataset_path = "/gemini/data-1/processed_datasets_csi1000"
 
         # =================================================================
         # Training Hyperparameters
@@ -77,13 +77,13 @@ class Config:
 
         # Base directory for saving model checkpoints and results.
         # Using a general 'outputs' directory is a common practice.
-        self.save_path = "/gemini/code/outputs/csi1000_models"
+        self.save_path = "/gemini/data-1/outputs/csi1000_models"
         self.tokenizer_save_folder_name = 'finetune_tokenizer'
         self.predictor_save_folder_name = 'finetune_predictor'
         self.backtest_save_folder_name = 'finetune_backtest'
 
         # Path for backtesting results.
-        self.backtest_result_path = "/gemini/code/outputs/csi1000_backtest_results"
+        self.backtest_result_path = "/gemini/data-1/outputs/csi1000_backtest_results"
 
         # =================================================================
         # Model & Checkpoint Paths
