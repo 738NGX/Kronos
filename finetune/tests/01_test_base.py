@@ -18,6 +18,10 @@ except ImportError:
     print("❌ Error: Could not import 'model'. Please run this script in the correct directory.")
     sys.exit(1)
 
+# Import visualization utilities
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.visualization_utils import plot_predictions
+
 # ================= Configuration =================
 CONFIG = {
     "lookback": 400,
@@ -112,7 +116,7 @@ def calculate_metrics(results_df):
         ret_corr, _ = spearmanr(ret_real, ret_pred)
         
         metrics.append({
-            "horizon": f"未来{step}日",
+            "horizon": f"T+{step}",
             "price_corr": price_corr,
             "price_mae": price_mae,
             "ret_corr": ret_corr,
@@ -123,14 +127,21 @@ def calculate_metrics(results_df):
 
 # ================= Main Logic =================
 
-def run_reproduction():
+def run_reproduction(combine_plots=True):
+    """
+    运行基础模型测试
+    
+    Args:
+        combine_plots: bool, True=拼成大图，False=独立输出每个指数图表
+    """
     # 1. Load Model (Load ONCE to save time)
-    print(f"🚀 Loading Kronos Model on {CONFIG['device']}...")
+    print(f"🚀 Loading Kronos Base Model on {CONFIG['device']}...")
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
     model = Kronos.from_pretrained("NeoQuasar/Kronos-base")
     predictor = KronosPredictor(model, tokenizer, device=CONFIG['device'], max_context=CONFIG['lookback'])
     
     all_metrics = []
+    all_results = {}  # 存储所有指数的预测结果用于画图
 
     # 2. Iterate Indices
     for name, symbol in INDICES.items():
@@ -216,72 +227,68 @@ def run_reproduction():
 
         # 4. Save and Analyze Results for this Index
         res_df = pd.DataFrame(predictions)
-        res_df.to_csv(os.path.join(OUTPUT_DIR, f"{name}_rolling_preds.csv"), index=False)
+        res_df.to_csv(os.path.join(OUTPUT_DIR, f"predictions_base_{name}.csv"), index=False)
         
-        # Calculate Metrics (Table 6-9 reproduction)
+        # Calculate Metrics
         idx_metrics = calculate_metrics(res_df)
         idx_metrics["Index"] = name
         all_metrics.append(idx_metrics)
         
-        # 5. Plot Curves (Figure 10-15 reproduction)
-        plot_rolling_curve(res_df, name)
+        # 存储结果用于后续画图
+        all_results[name] = res_df
 
     # 6. Aggregate All Metrics into Summary Tables
     if all_metrics:
-        final_df = pd.concat(all_metrics)
+        final_df = pd.concat(all_metrics, ignore_index=True)
         
-        print("\n\n📊 ============ REPRODUCTION RESULTS ============")
+        print("\n\n" + "="*60)
+        print("📊 BASE MODEL - EVALUATION RESULTS")
+        print("="*60)
         
-        # Pivot for Price Correlation (Figure 6)
-        fig6 = final_df.pivot(index="Index", columns="horizon", values="price_corr")
-        print("\n[Figure 6] Price Correlation (Spearman):")
-        print(fig6)
-        fig6.to_csv(os.path.join(OUTPUT_DIR, "Fig6_Price_Correlation.csv"))
+        # 保存完整指标表
+        final_df.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_all.csv"), index=False)
+        print(f"\n✅ 完整指标已保存: metrics_base_all.csv")
         
-        # Pivot for Price MAE (Figure 7)
-        fig7 = final_df.pivot(index="Index", columns="horizon", values="price_mae")
-        print("\n[Figure 7] Price MAE:")
-        print(fig7)
-        fig7.to_csv(os.path.join(OUTPUT_DIR, "Fig7_Price_MAE.csv"))
+        # Pivot for Price Correlation
+        price_corr = final_df.pivot(index="Index", columns="horizon", values="price_corr")
+        print("\n[1] Price Correlation (Spearman):")
+        print(price_corr.to_string())
+        price_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_price_correlation.csv"))
+        
+        # Pivot for Price MAE
+        price_mae = final_df.pivot(index="Index", columns="horizon", values="price_mae")
+        print("\n[2] Price MAE:")
+        print(price_mae.to_string())
+        price_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_price_mae.csv"))
 
-        # Pivot for Return Correlation (Figure 8)
-        fig8 = final_df.pivot(index="Index", columns="horizon", values="ret_corr")
-        print("\n[Figure 8] Return Correlation (Spearman):")
-        print(fig8)
-        fig8.to_csv(os.path.join(OUTPUT_DIR, "Fig8_Return_Correlation.csv"))
+        # Pivot for Return Correlation
+        ret_corr = final_df.pivot(index="Index", columns="horizon", values="ret_corr")
+        print("\n[3] Return Correlation (Spearman):")
+        print(ret_corr.to_string())
+        ret_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_return_correlation.csv"))
         
-        # Pivot for Return MAE (Figure 9)
-        fig9 = final_df.pivot(index="Index", columns="horizon", values="ret_mae")
-        print("\n[Figure 9] Return MAE:")
-        print(fig9)
-        fig9.to_csv(os.path.join(OUTPUT_DIR, "Fig9_Return_MAE.csv"))
-
-def plot_rolling_curve(df, name):
-    """Plot T+1 Prediction vs Ground Truth (Replicates Fig 10-15)."""
-    plt.figure(figsize=(12, 6))
+        # Pivot for Return MAE
+        ret_mae = final_df.pivot(index="Index", columns="horizon", values="ret_mae")
+        print("\n[4] Return MAE:")
+        print(ret_mae.to_string())
+        ret_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_return_mae.csv"))
+        
+        print("\n" + "="*60)
+        print(f"📁 所有结果文件已保存到: {OUTPUT_DIR}")
+        print("="*60)
     
-    # Plot Real Close
-    # We use 'real_t+1' shifted back by 1 day to align visually with prediction date?
-    # Actually, standard is: Plot(Time, Real_Close) vs Plot(Time, Pred_Close_for_Time)
-    
-    # Align dates: The row 'date' is the INFERENCE date. 'pred_t+1' is for date+1.
-    # We want to plot the value on the day it actually happened.
-    plot_dates = df["date"] + pd.Timedelta(days=1) # Shift to target date
-    
-    plt.plot(plot_dates, df["real_t+1"], label="Ground_truth", color="gray", alpha=0.7, linewidth=1.5)
-    plt.plot(plot_dates, df["pred_t+1"], label="Prediction", color="#8B0000", linewidth=1.5) # Dark red matches CICC style
-    
-    plt.title(f"{name} Future 1-Day Price Prediction vs Ground Truth\n(2025.01 - 2025.09)", fontsize=14)
-    plt.xlabel("Date")
-    plt.ylabel("Price")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Save
-    path = os.path.join(OUTPUT_DIR, f"Fig_{name}_Prediction_Curve.png")
-    plt.savefig(path)
-    plt.close()
-    print(f"📈 Saved chart to {path}")
+    # 7. 绘制预测曲线
+    if all_results:
+        print("\n🎨 开始绘制预测曲线...")
+        plot_predictions(all_results, OUTPUT_DIR, model_name="base", 
+                        test_config=CONFIG, combine_subplots=combine_plots)
 
 if __name__ == "__main__":
-    run_reproduction()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test Kronos Base Model')
+    parser.add_argument('--separate-plots', action='store_true', 
+                       help='输出独立图表而非组合大图')
+    args = parser.parse_args()
+    
+    run_reproduction(combine_plots=not args.separate_plots)

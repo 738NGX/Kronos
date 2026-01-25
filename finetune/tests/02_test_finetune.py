@@ -17,6 +17,10 @@ plt.rcParams['axes.unicode_minus'] = False
 sys.path.append("/gemini/code/") 
 from model import Kronos, KronosTokenizer, KronosPredictor
 
+# Import visualization utilities
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from utils.visualization_utils import plot_predictions
+
 # ================= Configuration =================
 CONFIG = {
     # 路径配置：直接指向 safetensors
@@ -167,7 +171,13 @@ def calculate_metrics(results_df):
 
 # ================= Main Logic =================
 
-def run_inference():
+def run_inference(combine_plots=True):
+    """
+    运行微调模型测试
+    
+    Args:
+        combine_plots: bool, True=拼成大图，False=独立输出每个指数图表
+    """
     # 1. 加载微调后的模型 (Safetensors)
     print(f"🚀 Loading Finetuned Kronos from {CONFIG['model_path']}...")
     
@@ -185,6 +195,7 @@ def run_inference():
     )
     
     all_metrics = []
+    all_results = {}  # 存储所有指数的预测结果用于画图
 
     # 2. 遍历指数
     for name, symbol in INDICES.items():
@@ -260,35 +271,68 @@ def run_inference():
 
         # 保存结果
         res_df = pd.DataFrame(predictions)
-        res_df.to_csv(os.path.join(OUTPUT_DIR, f"{name}_finetuned_preds.csv"), index=False)
+        res_df.to_csv(os.path.join(OUTPUT_DIR, f"predictions_finetuned_{name}.csv"), index=False)
         
         # 计算指标
         idx_metrics = calculate_metrics(res_df)
         idx_metrics["Index"] = name
         all_metrics.append(idx_metrics)
         
-        # 绘图
-        plot_curve(res_df, name)
+        # 存储结果用于后续画图
+        all_results[name] = res_df
 
     # 汇总保存
     if all_metrics:
-        final_df = pd.concat(all_metrics)
-        print("\n📊 Final Metrics:")
-        print(final_df)
-        final_df.to_csv(os.path.join(OUTPUT_DIR, "all_indices_metrics.csv"))
+        final_df = pd.concat(all_metrics, ignore_index=True)
+        
+        print("\n\n" + "="*60)
+        print("📊 FINETUNED MODEL - EVALUATION RESULTS")
+        print("="*60)
+        
+        # 保存完整指标表
+        final_df.to_csv(os.path.join(OUTPUT_DIR, "metrics_finetuned_all.csv"), index=False)
+        print(f"\n✅ 完整指标已保存: metrics_finetuned_all.csv")
+        
+        # Pivot for Price Correlation
+        price_corr = final_df.pivot(index="Index", columns="horizon", values="price_corr")
+        print("\n[1] Price Correlation (Spearman):")
+        print(price_corr.to_string())
+        price_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_finetuned_price_correlation.csv"))
+        
+        # Pivot for Price MAE
+        price_mae = final_df.pivot(index="Index", columns="horizon", values="price_mae")
+        print("\n[2] Price MAE:")
+        print(price_mae.to_string())
+        price_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_finetuned_price_mae.csv"))
 
-def plot_curve(df, name):
-    plt.figure(figsize=(12, 6))
-    plot_dates = df["date"] + pd.Timedelta(days=1)
+        # Pivot for Return Correlation
+        ret_corr = final_df.pivot(index="Index", columns="horizon", values="ret_corr")
+        print("\n[3] Return Correlation (Spearman):")
+        print(ret_corr.to_string())
+        ret_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_finetuned_return_correlation.csv"))
+        
+        # Pivot for Return MAE
+        ret_mae = final_df.pivot(index="Index", columns="horizon", values="ret_mae")
+        print("\n[4] Return MAE:")
+        print(ret_mae.to_string())
+        ret_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_finetuned_return_mae.csv"))
+        
+        print("\n" + "="*60)
+        print(f"📁 所有结果文件已保存到: {OUTPUT_DIR}")
+        print("="*60)
     
-    plt.plot(plot_dates, df["real_t+1"], label="Ground Truth", color="gray", alpha=0.6)
-    plt.plot(plot_dates, df["pred_t+1"], label="Finetuned Prediction", color="#8B0000", lw=1.5)
-    
-    plt.title(f"{name} (Finetuned Model) T+1 Prediction")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(OUTPUT_DIR, f"Fig_{name}_Curve.png"))
-    plt.close()
+    # 7. 绘制预测曲线
+    if all_results:
+        print("\n🎨 开始绘制预测曲线...")
+        plot_predictions(all_results, OUTPUT_DIR, model_name="finetuned", 
+                        test_config=CONFIG, combine_subplots=combine_plots)
 
 if __name__ == "__main__":
-    run_inference()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Test Kronos Finetuned Model')
+    parser.add_argument('--separate-plots', action='store_true', 
+                       help='输出独立图表而非组合大图')
+    args = parser.parse_args()
+    
+    run_inference(combine_plots=not args.separate_plots)
