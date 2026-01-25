@@ -1,11 +1,5 @@
 import os
 import sys
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.stats import spearmanr
-from tqdm import tqdm
-import torch
 
 # Import shared utilities
 from testutils.test_utils import (
@@ -36,9 +30,7 @@ CONFIG = {
     "sample_count": 10,
     "test_start": "2025-01-01",
     "test_end": "2025-09-30",
-    "device": "cuda:0",
-    "batch_days": 10,
-    "micro_batch_size": 64
+    "device": "cuda:0"
 }
 
 OUTPUT_DIR = "/gemini/code/outputs/base_test"
@@ -60,12 +52,6 @@ def run_reproduction(combine_plots=True):
     print(f"🚀 Loading Kronos Base Model on {CONFIG['device']}...")
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
     model = Kronos.from_pretrained("NeoQuasar/Kronos-base")
-    # 固定到单卡 0，减少设备句柄解析复杂度
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.set_device(0)
-    except Exception:
-        pass
     predictor = KronosPredictor(model, tokenizer, device=CONFIG['device'], max_context=CONFIG['lookback'])
     
     # 2. 批量推理所有指数

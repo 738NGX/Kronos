@@ -1,13 +1,4 @@
 import os
-import sys
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from scipy.stats import spearmanr
-from tqdm import tqdm
-import os
-import torch
-from safetensors.torch import load_file
 
 # Import shared utilities
 from testutils.test_utils import (
@@ -46,9 +37,7 @@ CONFIG = {
     # 特征列定义 (必须与微调训练时一致)
     "feature_cols": ["open", "high", "low", "close", "volume"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 3.0,          # 归一化截断值，与训练保持一致
-    "batch_days": 30,
-    "micro_batch_size": 64
+    "clip_val": 3.0           # 归一化截断值，与训练保持一致
 }
 
 OUTPUT_DIR = "/gemini/code/outputs/finetuned_test"
@@ -75,12 +64,7 @@ def run_inference(combine_plots=True):
     # 但如果通过 use_safetensors=True 强制指定会更稳妥
     model = Kronos.from_pretrained(CONFIG['model_path'])
     
-    # 初始化预测器（固定到单卡 0）
-    try:
-        if torch.cuda.is_available():
-            torch.cuda.set_device(0)
-    except Exception:
-        pass
+    # 初始化预测器
     predictor = KronosPredictor(
         model, tokenizer, 
         device=CONFIG['device'], 
