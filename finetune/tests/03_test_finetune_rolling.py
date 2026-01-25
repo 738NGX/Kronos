@@ -148,48 +148,68 @@ class ParameterOptimizer:
     def _evaluate_params(self, val_data: Dict, params: Dict) -> float:
         """
         在验证集上评估参数效果
+        
+        Args:
+            val_data: 验证集数据字典
+            params: 参数字典
+        
+        Returns:
+            float: 评估指标 (MAPE)
+        
+        Raises:
+            AssertionError: 如果无法评估（数据不足、预测器为空等）
         """
-        if not val_data or self.predictor is None:
-            return 0.0  # 模拟模式返回0
+        assert val_data, "验证集数据为空"
+        assert self.predictor is not None, "预测器未初始化（可能是模拟模式）"
         
         lookback = params.get("lookback", self.config["lookback"])
         all_mapes = []
         
         for name, df in val_data.items():
-            if len(df) < lookback + self.config["pred_len"]:
-                continue
+            # 确保数据长度足够
+            assert len(df) >= lookback + self.config["pred_len"], \
+                f"数据不足：{name} 只有 {len(df)} 行，需要 {lookback + self.config['pred_len']} 行"
             
             mapes = []
-            # 采样评估以加快速度
-            step = max(1, len(df) // 10)
+            # 采样评估以加快速度（每个数据集最多10个样本）
+            step = max(1, (len(df) - lookback - self.config["pred_len"]) // 10)
+            if step == 0:
+                step = 1
             
             for idx in range(lookback, len(df) - self.config["pred_len"] + 1, step):
-                try:
-                    input_df = df.iloc[idx - lookback + 1 : idx + 1].copy()
-                    x_norm, x_stamp, x_mean, x_std = preprocess_window_finetuned(input_df, self.config)
-                    
-                    with torch.no_grad():
-                        pred = self.predictor.predict(
-                            x=x_norm,
-                            x_stamp=x_stamp,
-                            T=params.get("T", self.config["T"]),
-                            top_p=params.get("top_p", self.config["top_p"]),
-                            sample_count=1
-                        )
-                    
-                    pred_denorm = denormalize(pred, x_mean, x_std, target_col_idx=3)
-                    actual = df.iloc[idx + 1]["close"]
-                    
-                    if actual > 0:
-                        mape = abs((actual - pred_denorm[0]) / actual)
-                        mapes.append(mape)
-                except:
-                    pass
+                input_df = df.iloc[idx - lookback + 1 : idx + 1].copy()
+                
+                # 数据验证
+                assert len(input_df) == lookback + 1, f"Expected {lookback + 1} rows, got {len(input_df)}"
+                
+                x_norm, x_stamp, x_mean, x_std = preprocess_window_finetuned(input_df, self.config)
+                
+                with torch.no_grad():
+                    pred = self.predictor.predict(
+                        x=x_norm,
+                        x_stamp=x_stamp,
+                        T=params.get("T", self.config["T"]),
+                        top_p=params.get("top_p", self.config["top_p"]),
+                        sample_count=1
+                    )
+                
+                # 反归一化和评估
+                pred_denorm = denormalize(pred, x_mean, x_std, target_col_idx=3)
+                actual = df.iloc[idx + 1]["close"]
+                
+                assert actual > 0, f"Invalid actual price: {actual}"
+                assert pred_denorm is not None, "Prediction denormalization failed"
+                
+                mape = abs((actual - pred_denorm[0]) / actual)
+                assert not np.isnan(mape) and not np.isinf(mape), f"Invalid MAPE: {mape}"
+                mapes.append(mape)
             
             if mapes:
                 all_mapes.extend(mapes)
         
-        return np.mean(all_mapes) if all_mapes else float('inf')
+        # 返回平均MAPE
+        assert all_mapes, "No valid MAPE samples found during evaluation"
+        return np.mean(all_mapes)
     
     def save_history(self, output_dir: str):
         """保存参数优化历史"""
@@ -327,24 +347,22 @@ def run_rolling_inference(combine_plots=True):
         # 准备验证集数据用于参数优化
         val_data = {}
         for name, symbol in INDICES.items():
-            try:
-                df = all_data[all_data['代码'] == symbol].copy()
-                if df.empty:
-                    continue
-                df.rename(columns={
-                    "时间": "date", "开盘价(元)": "open",
-                    "最高价(元)": "high", "最低价(元)": "low",
-                    "收盘价(元)": "close", "成交量(万股)": "volume"
-                }, inplace=True)
-                df["date"] = pd.to_datetime(df["date"])
-                df = df.sort_values("date").reset_index(drop=True)
-                
-                mask = (df["date"] >= train_val_start) & (df["date"] <= train_val_end)
-                val_df = df[mask].reset_index(drop=True)
-                if len(val_df) > 0:
-                    val_data[name] = val_df
-            except:
-                pass
+            df = all_data[all_data['代码'] == symbol].copy()
+            assert not df.empty, f"指数 {name} ({symbol}) 的数据为空"
+            
+            df.rename(columns={
+                "时间": "date", "开盘价(元)": "open",
+                "最高价(元)": "high", "最低价(元)": "low",
+                "收盘价(元)": "close", "成交量(万股)": "volume"
+            }, inplace=True)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+            
+            mask = (df["date"] >= train_val_start) & (df["date"] <= train_val_end)
+            val_df = df[mask].reset_index(drop=True)
+            assert len(val_df) > 0, \
+                f"指数 {name}: 时间范围 {train_val_start} ~ {train_val_end} 无数据"
+            val_data[name] = val_df
         
         # Step 1: 参数优化
         if val_data and predictor is not None:
