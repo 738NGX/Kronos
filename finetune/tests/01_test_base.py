@@ -8,18 +8,25 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 import torch
 
-plt.rcParams['font.family'] = 'Noto Serif CJK JP'
+# Import shared utilities
+from testutils.test_utils import (
+    setup_environment, 
+    process_index_results,
+    aggregate_and_save_metrics,
+    plot_all_results,
+    parse_test_args
+)
+from testutils.common_config import INDICES
+from testutils.data_utils import read_test_data, load_and_prepare_index_data
 
-# Ensure model path is accessible
-sys.path.append("/gemini/code/") 
+# Setup environment (fonts, paths, etc.)
+setup_environment()
+
 try:
     from model import Kronos, KronosTokenizer, KronosPredictor
 except ImportError:
     print("❌ Error: Could not import 'model'. Please run this script in the correct directory.")
     sys.exit(1)
-
-# Import visualization utilities
-from testutils.visualization_utils import plot_predictions
 
 # ================= Configuration =================
 CONFIG = {
@@ -33,104 +40,8 @@ CONFIG = {
     "device": "cuda:0"
 }
 
-# Index Mapping (Akshare Symbols)
-INDICES = {
-    "上证50": "000016.SH",
-    "沪深300": "000300.SH",
-    "中证500": "000905.SH",
-    "中证1000": "000852.SH",
-    "中证2000": "932000.CSI",
-    "中证红利": "000922.CSI",
-    "恒生指数": "HSI.HK",
-    "恒生科技": "HSTECH.HK",
-    "黄金ETF": "518880.SH",
-}
-
 OUTPUT_DIR = "/gemini/code/outputs/base_test"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ================= Helper Functions =================
-
-def get_index_data(symbol_code, name):
-    print(f"📥 Loading {name} ({symbol_code}) from local iFind export...")
-    try:
-        # Try common Chinese encodings
-        for encoding in ['gbk', 'gb2312', 'gb18030', 'utf-8']:
-            try:
-                full_df = pd.read_csv('/gemini/data-1/test_data.csv', thousands=',', encoding=encoding)
-                break
-            except (UnicodeDecodeError, LookupError):
-                continue
-        else:
-            raise ValueError("无法使用常见编码读取CSV文件")
-
-        df = full_df[full_df['代码'] == symbol_code].copy()
-        
-        df = df.rename(columns={
-            "时间": "date",
-            "开盘价(元)": "open",
-            "最高价(元)": "high",
-            "最低价(元)": "low",
-            "收盘价(元)": "close",
-            "成交量(万股)": "volume",
-            "成交金额(万元)": "amount"
-        })
-
-        # Handle 'amount' (turnover)
-        if "amount" not in df.columns:
-            # Some akshare index interfaces lack amount, estimate it or leave simplified
-            df["amount"] = df["close"] * df["volume"]
-        
-        df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values("date").reset_index(drop=True)
-        
-        # Type conversion
-        cols = ["open", "high", "low", "close", "volume", "amount"]
-        for c in cols:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-            
-        return df
-    except Exception as e:
-        print(f"⚠️ Failed to fetch {name}: {e}")
-        return None
-
-def calculate_metrics(results_df):
-    """Calculate Spearman Corr and MAE for Price and Returns (T+1 to T+5)."""
-    metrics = []
-    
-    # Iterate through horizons T+1 to T+5
-    for step in range(1, 6):
-        col_pred = f"pred_t+{step}"
-        col_real = f"real_t+{step}"
-        
-        # Filter valid rows
-        valid = results_df.dropna(subset=[col_pred, col_real])
-        
-        if len(valid) == 0:
-            continue
-            
-        # 1. Price Metrics
-        price_mae = np.mean(np.abs(valid[col_pred] - valid[col_real]))
-        price_corr, _ = spearmanr(valid[col_pred], valid[col_real])
-        
-        # 2. Return Metrics
-        # Real return: (Price_T+n / Price_T_current) - 1
-        # Note: In the rolling log, 'current_close' is the close price on the inference day
-        ret_real = (valid[col_real] / valid["current_close"]) - 1
-        ret_pred = (valid[col_pred] / valid["current_close"]) - 1
-        
-        ret_mae = np.mean(np.abs(ret_real - ret_pred))
-        ret_corr, _ = spearmanr(ret_real, ret_pred)
-        
-        metrics.append({
-            "horizon": f"T+{step}",
-            "price_corr": price_corr,
-            "price_mae": price_mae,
-            "ret_corr": ret_corr,
-            "ret_mae": ret_mae
-        })
-        
-    return pd.DataFrame(metrics)
 
 # ================= Main Logic =================
 
@@ -141,6 +52,9 @@ def run_reproduction(combine_plots=True):
     Args:
         combine_plots: bool, True=拼成大图，False=独立输出每个指数图表
     """
+    # 0. 一次性读取CSV文件
+    all_data = read_test_data()
+    
     # 1. Load Model (Load ONCE to save time)
     print(f"🚀 Loading Kronos Base Model on {CONFIG['device']}...")
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
@@ -153,21 +67,12 @@ def run_reproduction(combine_plots=True):
     # 2. Iterate Indices
     for name, symbol in INDICES.items():
         print(f"\n{'='*10} Processing {name} {'='*10}")
-        df = get_index_data(symbol, name)
-        if df is None: continue
-
-        # Filter Date Range (Ensure enough lookback data exists)
-        test_start_dt = pd.to_datetime(CONFIG['test_start'])
-        test_end_dt = pd.to_datetime(CONFIG['test_end'])
         
-        # Locate indices for the testing window
-        mask = (df["date"] >= test_start_dt) & (df["date"] <= test_end_dt)
-        test_indices = df[mask].index
-        
-        if len(test_indices) == 0:
-            print(f"Skipping {name}: No data in test range.")
+        # 加载并预处理指数数据
+        df, test_indices = load_and_prepare_index_data(all_data, name, symbol, CONFIG)
+        if df is None:
             continue
-
+        
         predictions = []
         
         # 3. Rolling Inference Loop
@@ -233,69 +138,16 @@ def run_reproduction(combine_plots=True):
                 pass
 
         # 4. Save and Analyze Results for this Index
-        res_df = pd.DataFrame(predictions)
-        res_df.to_csv(os.path.join(OUTPUT_DIR, f"predictions_base_{name}.csv"), index=False)
-        
-        # Calculate Metrics
-        idx_metrics = calculate_metrics(res_df)
-        idx_metrics["Index"] = name
+        res_df, idx_metrics = process_index_results(predictions, OUTPUT_DIR, "base", name)
         all_metrics.append(idx_metrics)
-        
-        # 存储结果用于后续画图
         all_results[name] = res_df
 
     # 6. Aggregate All Metrics into Summary Tables
-    if all_metrics:
-        final_df = pd.concat(all_metrics, ignore_index=True)
-        
-        print("\n\n" + "="*60)
-        print("📊 BASE MODEL - EVALUATION RESULTS")
-        print("="*60)
-        
-        # 保存完整指标表
-        final_df.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_all.csv"), index=False)
-        print(f"\n✅ 完整指标已保存: metrics_base_all.csv")
-        
-        # Pivot for Price Correlation
-        price_corr = final_df.pivot(index="Index", columns="horizon", values="price_corr")
-        print("\n[1] Price Correlation (Spearman):")
-        print(price_corr.to_string())
-        price_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_price_correlation.csv"))
-        
-        # Pivot for Price MAE
-        price_mae = final_df.pivot(index="Index", columns="horizon", values="price_mae")
-        print("\n[2] Price MAE:")
-        print(price_mae.to_string())
-        price_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_price_mae.csv"))
-
-        # Pivot for Return Correlation
-        ret_corr = final_df.pivot(index="Index", columns="horizon", values="ret_corr")
-        print("\n[3] Return Correlation (Spearman):")
-        print(ret_corr.to_string())
-        ret_corr.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_return_correlation.csv"))
-        
-        # Pivot for Return MAE
-        ret_mae = final_df.pivot(index="Index", columns="horizon", values="ret_mae")
-        print("\n[4] Return MAE:")
-        print(ret_mae.to_string())
-        ret_mae.to_csv(os.path.join(OUTPUT_DIR, "metrics_base_return_mae.csv"))
-        
-        print("\n" + "="*60)
-        print(f"📁 所有结果文件已保存到: {OUTPUT_DIR}")
-        print("="*60)
+    aggregate_and_save_metrics(all_metrics, OUTPUT_DIR, "base")
     
     # 7. 绘制预测曲线
-    if all_results:
-        print("\n🎨 开始绘制预测曲线...")
-        plot_predictions(all_results, OUTPUT_DIR, model_name="base", 
-                        test_config=CONFIG, combine_subplots=combine_plots)
+    plot_all_results(all_results, OUTPUT_DIR, "base", CONFIG, combine_plots)
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='Test Kronos Base Model')
-    parser.add_argument('--separate-plots', action='store_true', 
-                       help='输出独立图表而非组合大图')
-    args = parser.parse_args()
-    
+    args = parse_test_args('Test Kronos Base Model')
     run_reproduction(combine_plots=not args.separate_plots)
