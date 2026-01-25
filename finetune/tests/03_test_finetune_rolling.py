@@ -95,7 +95,9 @@ class ParameterOptimizer:
         self,
         val_data: pd.DataFrame,
         param_space: Dict,
-        indices_dict: Dict
+        indices_dict: Dict,
+        val_start: pd.Timestamp,
+        val_end: pd.Timestamp
     ) -> Dict:
         """
         对验证集进行参数网格搜索
@@ -109,6 +111,21 @@ class ParameterOptimizer:
             dict: 最优参数
         """
         print("\n🔍 [参数网格搜索] 优化推理参数...")
+
+        # 根据验证集可用长度动态裁剪可用的 lookback，避免出现“数据不足”
+        max_lookback_allowed = min(len(df) - self.config["pred_len"] for df in val_data.values())
+        assert max_lookback_allowed > 0, f"验证集长度不足以进行预测 (pred_len={self.config['pred_len']})"
+
+        filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
+        assert filtered_lookbacks, (
+            f"无可用 lookback: 需要 <= {max_lookback_allowed}, 当前搜索空间 {param_space['lookback']}"
+        )
+        param_space = {
+            "T": param_space["T"],
+            "top_p": param_space["top_p"],
+            "lookback": filtered_lookbacks
+        }
+        print(f"   可用最大 lookback: {max_lookback_allowed}, 实际搜索: {filtered_lookbacks}")
         
         param_names = list(param_space.keys())
         param_values = list(param_space.values())
@@ -124,7 +141,7 @@ class ParameterOptimizer:
             params = dict(zip(param_names, combo))
             
             # 使用验证集评估
-            score = self._evaluate_params(val_data, params)
+            score = self._evaluate_params(val_data, params, val_start, val_end)
             results.append({"params": params, "score": score})
             
             if score < best_score:
@@ -145,7 +162,7 @@ class ParameterOptimizer:
         
         return best_params
     
-    def _evaluate_params(self, val_data: Dict, params: Dict) -> float:
+    def _evaluate_params(self, val_data: Dict, params: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> float:
         """
         在验证集上评估参数效果
         
@@ -166,18 +183,24 @@ class ParameterOptimizer:
         all_mapes = []
         
         for name, df in val_data.items():
-            # 确保数据长度足够
-            assert len(df) >= lookback + self.config["pred_len"], \
-                f"数据不足：{name} 只有 {len(df)} 行，需要 {lookback + self.config['pred_len']} 行"
-            
+            # 仅在验证窗内打分，但允许使用更早的历史作为上下文
+            mask_eval = (df["date"] >= val_start) & (df["date"] <= val_end - pd.Timedelta(days=self.config["pred_len"]))
+            eval_indices = df[mask_eval].index.tolist()
+            if not eval_indices:
+                continue
+
             mapes = []
-            # 采样评估以加快速度（每个数据集最多10个样本）
-            step = max(1, (len(df) - lookback - self.config["pred_len"]) // 10)
+            step = max(1, (len(eval_indices)) // 10)
             if step == 0:
                 step = 1
-            
-            for idx in range(lookback, len(df) - self.config["pred_len"] + 1, step):
-                # 取当前时刻之前的lookback行 + 当前时刻共lookback+1行（原始价格，不做预处理）
+
+            for idx in eval_indices[::step]:
+                if idx < lookback:
+                    continue
+                if idx + self.config["pred_len"] >= len(df):
+                    continue
+
+                # 取当前时刻之前的 lookback 行 + 当前时刻，共 lookback+1 行（原始价格，不做预处理）
                 input_df = df.iloc[idx - lookback : idx + 1].copy()
                 assert len(input_df) == lookback + 1, f"Expected {lookback + 1} rows, got {len(input_df)}"
 
@@ -206,7 +229,7 @@ class ParameterOptimizer:
                 mape = abs((actual_close - pred_close) / actual_close)
                 assert not np.isnan(mape) and not np.isinf(mape), f"Invalid MAPE: {mape}"
                 mapes.append(mape)
-            
+
             if mapes:
                 all_mapes.extend(mapes)
         
@@ -327,6 +350,55 @@ def run_rolling_inference(combine_plots=True):
             "test_end": "2025-01-31"
         },
         {
+            "name": "2025.1-2月",
+            "train_val_start": "2025-01-01",
+            "train_val_end": "2025-02-28",
+            "test_start": "2025-02-01",
+            "test_end": "2025-02-28"
+        },
+        {
+            "name": "2025.2-3月",
+            "train_val_start": "2025-02-01",
+            "train_val_end": "2025-03-31",
+            "test_start": "2025-03-01",
+            "test_end": "2025-03-31"
+        },
+        {
+            "name": "2025.3-4月",
+            "train_val_start": "2025-03-01",
+            "train_val_end": "2025-04-30",
+            "test_start": "2025-04-01",
+            "test_end": "2025-04-30"
+        },
+        {
+            "name": "2025.4-5月",
+            "train_val_start": "2025-04-01",
+            "train_val_end": "2025-05-31",
+            "test_start": "2025-05-01",
+            "test_end": "2025-05-31"
+        },
+        {
+            "name": "2025.5-6月",
+            "train_val_start": "2025-05-01",
+            "train_val_end": "2025-06-30",
+            "test_start": "2025-06-01",
+            "test_end": "2025-06-30"
+        },
+        {
+            "name": "2025.6-7月",
+            "train_val_start": "2025-06-01",
+            "train_val_end": "2025-07-31",
+            "test_start": "2025-07-01",
+            "test_end": "2025-07-31"
+        },
+        {
+            "name": "2025.7-8月",
+            "train_val_start": "2025-07-01",
+            "train_val_end": "2025-08-31",
+            "test_start": "2025-08-01",
+            "test_end": "2025-08-31"
+        },
+        {
             "name": "2025.8-9月",
             "train_val_start": "2025-08-01",
             "train_val_end": "2025-09-30",
@@ -338,7 +410,7 @@ def run_rolling_inference(combine_plots=True):
     all_metrics = []
     all_results = {}
     
-    for period in rolling_periods:
+    for period_idx, period in enumerate(rolling_periods):
         print(f"\n   [周期] {period['name']}")
         
         # 划分训练/验证数据进行参数搜索
@@ -346,6 +418,8 @@ def run_rolling_inference(combine_plots=True):
         train_val_end = pd.to_datetime(period['train_val_end'])
         test_start = pd.to_datetime(period['test_start'])
         test_end = pd.to_datetime(period['test_end'])
+        max_lookback_space = max(PARAM_SEARCH_SPACE["lookback"])
+        history_start = train_val_start - pd.Timedelta(days=max_lookback_space * 3)
         
         # 准备验证集数据用于参数优化
         val_data = {}
@@ -361,15 +435,15 @@ def run_rolling_inference(combine_plots=True):
             df["date"] = pd.to_datetime(df["date"])
             df = df.sort_values("date").reset_index(drop=True)
             
-            mask = (df["date"] >= train_val_start) & (df["date"] <= train_val_end)
+            mask = (df["date"] >= history_start) & (df["date"] <= train_val_end)
             val_df = df[mask].reset_index(drop=True)
             assert len(val_df) > 0, \
-                f"指数 {name}: 时间范围 {train_val_start} ~ {train_val_end} 无数据"
+                f"指数 {name}: 时间范围 {history_start} ~ {train_val_end} 无数据"
             val_data[name] = val_df
         
         # Step 1: 参数优化
         if val_data and predictor is not None:
-            best_params = optimizer.grid_search(val_data, PARAM_SEARCH_SPACE, INDICES)
+            best_params = optimizer.grid_search(val_data, PARAM_SEARCH_SPACE, INDICES, train_val_start, train_val_end)
         else:
             best_params = CONFIG.copy()
             print("   ⚠️ 无法优化参数，使用默认值")
@@ -388,10 +462,14 @@ def run_rolling_inference(combine_plots=True):
             indices_dict=INDICES,
             config=test_config,
             output_dir=OUTPUT_DIR,
-            model_name=f"rolling_{period['name']}",
+            model_name=f"rolling_period{period_idx}",
             preprocess_fn=preprocess_window_finetuned,
             denormalize_fn=denormalize
         )
+        
+        # 为 metrics 添加周期标记，避免后续 pivot 时重复
+        for metric_df in period_metrics:
+            metric_df["period"] = period['name']
         
         all_metrics.extend(period_metrics)
         all_results.update(period_results)
@@ -399,8 +477,11 @@ def run_rolling_inference(combine_plots=True):
     # 4. 汇总保存结果 (与02保持一致)
     print("\n[4/4] 💾 保存结果...")
     
-    # 汇总指标
-    aggregate_and_save_metrics(all_metrics, OUTPUT_DIR, "rolling")
+    # 按周期分别汇总指标，避免 pivot 重复
+    for period_name in [p['name'] for p in rolling_periods]:
+        period_metrics = [m for m in all_metrics if m.get("period") == period_name]
+        if period_metrics:
+            aggregate_and_save_metrics(period_metrics, OUTPUT_DIR, f"rolling_{period_name}")
     
     # 绘制曲线 (与02保持一致)
     plot_all_results(all_results, OUTPUT_DIR, "rolling", CONFIG, combine_plots)
