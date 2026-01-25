@@ -32,12 +32,15 @@ CONFIG = {
 
 # Index Mapping (Akshare Symbols)
 INDICES = {
-    "沪深300": "sh000300",
-    "中证500": "sh000905",
-    "中证1000": "sh000852",
-    "中证2000": "sh932000", 
-    "国证成长": "sz399370", 
-    "国证价值": "sz399371" 
+    "上证50": "000016.SH",
+    "沪深300": "000300.SH",
+    "中证500": "000905.SH",
+    "中证1000": "000852.SH",
+    "中证2000": "932000.CSI",
+    "中证红利": "000922.CSI",
+    "恒生指数": "HSI.HK",
+    "恒生科技": "HSTECH.HK",
+    "黄金ETF": "518880.SH",
 }
 
 OUTPUT_DIR = "/gemeni/code/outputs/base_test"
@@ -46,18 +49,22 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # ================= Helper Functions =================
 
 def get_index_data(symbol_code, name):
-    """Fetch index data from Akshare and standardize columns."""
-    print(f"📥 Fetching data for {name} ({symbol_code})...")
+    print(f"📥 Loading {name} ({symbol_code}) from local iFind export...")
     try:
-        # Use stock_zh_index_daily for indices
-        df = ak.stock_zh_index_daily(symbol=symbol_code)
+        full_df = pd.read_csv('/gemini/data-1/test_data.csv', thousands=',')
+
+        df = full_df[full_df['代码'] == symbol_code].copy()
         
-        # Standardize columns to match Kronos expectation
         df = df.rename(columns={
-            "date": "date", "open": "open", "high": "high", 
-            "low": "low", "close": "close", "volume": "volume"
+            "时间": "date",
+            "开盘价(元)": "open",
+            "最高价(元)": "high",
+            "最低价(元)": "low",
+            "收盘价(元)": "close",
+            "成交量(万股)": "volume",
+            "成交金额(万元)": "amount"
         })
-        
+
         # Handle 'amount' (turnover)
         if "amount" not in df.columns:
             # Some akshare index interfaces lack amount, estimate it or leave simplified
