@@ -46,7 +46,7 @@ INDICES = {
     "黄金ETF": "518880.SH",
 }
 
-OUTPUT_DIR = "/gemeni/code/outputs/base_test"
+OUTPUT_DIR = "/gemini/code/outputs/base_test"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ================= Helper Functions =================
