@@ -6,6 +6,9 @@ import akshare as ak
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 from tqdm import tqdm
+import os
+# 禁用 PyTorch 的 NVML 使用，避免部分环境下的 CUDACachingAllocator 断言
+os.environ.setdefault("PYTORCH_NO_NVML", "1")
 import torch
 from safetensors.torch import load_file
 
