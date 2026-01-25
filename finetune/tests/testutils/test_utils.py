@@ -150,6 +150,7 @@ def run_batch_inference(
     
     # 按天批量（向量化）处理：每批包含多个天 × 多个指数
     batch_days = int(config.get('batch_days', 10))
+    micro_batch_size = int(config.get('micro_batch_size', 64))
     chunks = [common_indices[i:i + batch_days] for i in range(0, len(common_indices), batch_days)]
     print(f"🔄 批量推理：{len(indices_data)} 个指数 × {len(common_indices)} 天，分为 {len(chunks)} 批，每批 {batch_days} 天")
     
@@ -205,17 +206,28 @@ def run_batch_inference(
         if not batch_inputs:
             continue
 
-        # 统一批量预测一次
-        preds_list = predictor.predict_batch(
-            batch_inputs,
-            batch_x_timestamps,
-            batch_y_timestamps,
-            pred_len=config['pred_len'],
-            T=config['T'],
-            top_p=config.get('top_p', 0.9),
-            sample_count=config.get('sample_count', 1),
-            verbose=False
-        )
+        # 统一批量预测（可切分为微批次以规避环境问题）
+        preds_list = []
+        total = len(batch_inputs)
+        for start in range(0, total, micro_batch_size):
+            end = min(start + micro_batch_size, total)
+            sub_preds = predictor.predict_batch(
+                batch_inputs[start:end],
+                batch_x_timestamps[start:end],
+                batch_y_timestamps[start:end],
+                pred_len=config['pred_len'],
+                T=config['T'],
+                top_p=config.get('top_p', 0.9),
+                sample_count=config.get('sample_count', 1),
+                verbose=False
+            )
+            preds_list.extend(sub_preds)
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         # 将结果按指数分别收集
         for i in range(len(preds_list)):
