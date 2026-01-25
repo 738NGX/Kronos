@@ -20,5 +20,5 @@ xarray
 netCDF4
 openpyxl
 
-qlib
+pyqlib
 comet_ml
