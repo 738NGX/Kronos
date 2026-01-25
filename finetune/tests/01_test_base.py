@@ -19,7 +19,6 @@ except ImportError:
     sys.exit(1)
 
 # Import visualization utilities
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from utils.visualization_utils import plot_predictions
 
 # ================= Configuration =================
