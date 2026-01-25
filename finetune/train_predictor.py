@@ -171,6 +171,8 @@ def train_model(model, tokenizer, device, config, save_dir, logger, rank, world_
                 best_val_loss = avg_val_loss
                 save_path = f"{save_dir}/checkpoints/best_model"
                 model.module.save_pretrained(save_path)
+                if os.path.exists("/gemini/output/"):
+                    model.module.save_pretrained("/gemini/output/best_model_predictor")
                 print(f"Best model saved to {save_path} (Val Loss: {best_val_loss:.4f})")
 
         dist.barrier()
