@@ -46,7 +46,8 @@ CONFIG = {
     # 特征列定义 (必须与微调训练时一致)
     "feature_cols": ["open", "high", "low", "close", "volume"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 3.0           # 归一化截断值，与训练保持一致
+    "clip_val": 3.0,          # 归一化截断值，与训练保持一致
+    "batch_days": 30
 }
 
 OUTPUT_DIR = "/gemini/code/outputs/finetuned_test"

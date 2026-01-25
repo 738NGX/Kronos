@@ -37,7 +37,8 @@ CONFIG = {
     "sample_count": 10,
     "test_start": "2025-01-01",
     "test_end": "2025-09-30",
-    "device": "cuda:0"
+    "device": "cuda:0",
+    "batch_days": 30
 }
 
 OUTPUT_DIR = "/gemini/code/outputs/base_test"
