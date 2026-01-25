@@ -18,7 +18,7 @@ sys.path.append("/gemini/code/")
 from model import Kronos, KronosTokenizer, KronosPredictor
 
 # Import visualization utilities
-from utils.visualization_utils import plot_predictions
+from testutils.visualization_utils import plot_predictions
 
 # ================= Configuration =================
 CONFIG = {

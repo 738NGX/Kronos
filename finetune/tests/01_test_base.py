@@ -19,7 +19,7 @@ except ImportError:
     sys.exit(1)
 
 # Import visualization utilities
-from utils.visualization_utils import plot_predictions
+from testutils.visualization_utils import plot_predictions
 
 # ================= Configuration =================
 CONFIG = {
