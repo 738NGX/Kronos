@@ -19,8 +19,8 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 # ================= Configuration =================
 CONFIG = {
     # 路径配置：直接指向 safetensors
-    "model_path": "/gemini/data-1/csi1000_finetune/finetune_predictor/checkpoints/best_model", # 假设该目录下有 model.safetensors
-    "tokenizer_path": "/gemini/data-1/csi1000_finetune/finetune_tokenizer/checkpoints/best_model", 
+    "model_path": "/gemini/data-1/outputs/csi1000_models/finetune_predictor/checkpoints/best_model", # 假设该目录下有 model.safetensors
+    "tokenizer_path": "/gemini/data-1/outputs/csi1000_models/finetune_tokenizer/checkpoints/best_model", 
     
     # 推理参数
     "lookback": 250,          # 必须与微调时的 context length 一致
