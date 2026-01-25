@@ -177,31 +177,33 @@ class ParameterOptimizer:
                 step = 1
             
             for idx in range(lookback, len(df) - self.config["pred_len"] + 1, step):
-                # 取当前时刻之前的lookback行 + 当前时刻共lookback+1行
+                # 取当前时刻之前的lookback行 + 当前时刻共lookback+1行（原始价格，不做预处理）
                 input_df = df.iloc[idx - lookback : idx + 1].copy()
-                
-                # 数据验证
                 assert len(input_df) == lookback + 1, f"Expected {lookback + 1} rows, got {len(input_df)}"
-                
-                x_norm, x_stamp, x_mean, x_std = preprocess_window_finetuned(input_df, self.config)
-                
+
+                # 构造时间戳
+                x_timestamp = input_df["date"]
+                y_timestamp = df.iloc[idx + 1 : idx + 1 + self.config["pred_len"]]["date"]
+                assert len(y_timestamp) == self.config["pred_len"], "预测时间戳长度不足"
+
                 with torch.no_grad():
-                    pred = self.predictor.predict(
-                        x=x_norm,
-                        x_stamp=x_stamp,
+                    pred_df = self.predictor.predict(
+                        df=input_df,
+                        x_timestamp=x_timestamp,
+                        y_timestamp=y_timestamp,
+                        pred_len=self.config["pred_len"],
                         T=params.get("T", self.config["T"]),
                         top_p=params.get("top_p", self.config["top_p"]),
-                        sample_count=1
+                        sample_count=1,
+                        verbose=False
                     )
-                
-                # 反归一化和评估
-                pred_denorm = denormalize(pred, x_mean, x_std, target_col_idx=3)
-                actual = df.iloc[idx + 1]["close"]
-                
-                assert actual > 0, f"Invalid actual price: {actual}"
-                assert pred_denorm is not None, "Prediction denormalization failed"
-                
-                mape = abs((actual - pred_denorm[0]) / actual)
+
+                # 评估第一步预测的 MAPE
+                actual_close = df.iloc[idx + 1]["close"]  # 与 y_timestamp 第一项对应
+                pred_close = pred_df.iloc[0]["close"]
+
+                assert actual_close > 0, f"Invalid actual price: {actual_close}"
+                mape = abs((actual_close - pred_close) / actual_close)
                 assert not np.isnan(mape) and not np.isinf(mape), f"Invalid MAPE: {mape}"
                 mapes.append(mape)
             
