@@ -54,7 +54,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def get_index_data(symbol_code, name):
     print(f"📥 Loading {name} ({symbol_code}) from local iFind export...")
     try:
-        full_df = pd.read_csv('/gemini/data-1/test_data.csv', thousands=',')
+        # Try common Chinese encodings
+        for encoding in ['gbk', 'gb2312', 'gb18030', 'utf-8']:
+            try:
+                full_df = pd.read_csv('/gemini/data-1/test_data.csv', thousands=',', encoding=encoding)
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        else:
+            raise ValueError("无法使用常见编码读取CSV文件")
 
         df = full_df[full_df['代码'] == symbol_code].copy()
         
