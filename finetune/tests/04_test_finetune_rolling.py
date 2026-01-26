@@ -1,7 +1,7 @@
 """
-微调版 Kronos 滚动择时系统 (双卡并行・线程安全修正版)
-- 核心逻辑：基于 Spearman IC 独立优选参数
-- 性能优化：双卡并行 + 强制设备上下文管理 (解决 Device Mismatch)
+微调版 Kronos 滚动择时系统 (混合加速版)
+- 策略: 双卡并行搜参 (提速) + 单卡串行推理 (稳定)
+- 修复: 彻底解决 ThreadSafePredictor 的属性缺失问题
 """
 
 import os
@@ -15,7 +15,6 @@ from typing import Dict, List, Optional
 from tqdm import tqdm
 from scipy.stats import spearmanr
 import warnings
-import copy
 from concurrent.futures import ThreadPoolExecutor
 
 # 过滤警告
@@ -46,10 +45,11 @@ CONFIG = {
     "T": 0.6,
     "top_p": 0.9,
     "sample_count": 10,
+    
     "test_start": "2025-01-01",
     "test_end": "2025-09-30",
     
-    # 🔴 GPU设置: 确保你有两张卡
+    # 双卡配置
     "gpu_ids": [0, 1], 
     
     "feature_cols": ["open", "high", "low", "close", "volume"],
@@ -63,47 +63,25 @@ PARAM_SEARCH_SPACE = {
     "lookback": [30, 60, 90]
 }
 
-OUTPUT_DIR = "/gemini/code/outputs/finetuned_rolling_dual_gpu"
+OUTPUT_DIR = "/gemini/data-1/outputs/finetuned_rolling_hybrid"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# ================= 🛡️ 核心修复: 线程安全预测包装器 =================
-
-class ThreadSafePredictor:
-    """
-    一个'保镖'类，确保在多线程环境下，predict 方法严格在指定的 GPU 上运行。
-    解决 'found at least two devices' 错误。
-    """
-    def __init__(self, original_predictor, device_id):
-        self.predictor = original_predictor
-        self.device_id = device_id
-        # 代理原始属性，骗过外部调用
-        self.model = original_predictor.model
-        self.tokenizer = original_predictor.tokenizer
-        self.device = f"cuda:{device_id}"
-        self.max_context = original_predictor.max_context
-
-    def predict(self, *args, **kwargs):
-        # ⚠️ 关键: 使用上下文管理器强制当前线程的所有 CUDA 操作指向 self.device_id
-        # 这确保了 predict 内部如果创建新 Tensor (如 input embedding)，它们会自动落在正确的卡上
-        with torch.cuda.device(self.device_id):
-            return self.predictor.predict(*args, **kwargs)
-
-# ================= 优化器 (逻辑不变) =================
+# ================= 优化器 (负责搜参) =================
 
 class ParameterOptimizer:
     def __init__(self, predictor, config: Dict, device_id: int):
-        self.predictor = predictor # 这里的 predictor 已经是被包装过的 ThreadSafePredictor
+        self.predictor = predictor
         self.config = config
         self.device_id = device_id
-        self.rolling_params_history = []
     
     def grid_search(self, val_data: Dict[str, pd.DataFrame], param_space: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> Dict[str, Dict]:
+        # 仅在 GPU 0 上打印进度，避免刷屏
         show_progress = (self.device_id == 0)
         
-        # 确保在正确的设备上下文中运行
+        # 强制上下文：确保搜参时的计算发生在正确的卡上
         with torch.cuda.device(self.device_id):
             if show_progress:
-                print(f"\n🔍 [GPU {self.device_id}] 独立参数优化 | 区间: {val_start.date()} ~ {val_end.date()}")
+                print(f"\n🔍 [Parallel Search] 正在双卡优选参数... | 区间: {val_start.date()} ~ {val_end.date()}")
 
             min_data_len = min(len(df) for df in val_data.values())
             max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
@@ -117,21 +95,22 @@ class ParameterOptimizer:
             best_ic_map = {name: -2.0 for name in val_data.keys()}
             best_params_map = {name: None for name in val_data.keys()}
 
-            iterator = tqdm(param_combinations, desc=f"   GPU {self.device_id} Search", leave=False, ncols=80) if show_progress else param_combinations
+            iterator = tqdm(param_combinations, desc=f"   GPU {self.device_id} Scanning", leave=False, ncols=80) if show_progress else param_combinations
             
             for combo in iterator:
                 params = dict(zip(param_names, combo))
+                # 这一步只调用 self.predictor.predict，这是安全的
                 scores_dict = self._evaluate_params_per_index(val_data, params, val_start, val_end)
                 for name, score in scores_dict.items():
                     if score > best_ic_map[name]:
                         best_ic_map[name] = score
                         best_params_map[name] = params.copy()
             
+            # 兜底
             default_params = {k: v[0] for k, v in final_space.items()}
             for name in val_data.keys():
                 if best_params_map[name] is None: best_params_map[name] = default_params
                     
-            self.rolling_params_history.append(best_params_map)
             return best_params_map
 
     def _evaluate_params_per_index(self, val_data, params, val_start, val_end):
@@ -162,7 +141,7 @@ class ParameterOptimizer:
                 
                 try:
                     with torch.no_grad():
-                        # predictor.predict 会自动处理 device context
+                        # 直接调用原始 predict，无需 Wrapper，因为我们在外部 with torch.cuda.device 控制了上下文
                         pred_df = self.predictor.predict(
                             df=input_df, x_timestamp=input_df["date"],
                             y_timestamp=df.iloc[idx + 1 : idx + 1 + pred_len]["date"],
@@ -184,82 +163,39 @@ class ParameterOptimizer:
                 except: results[name] = -1.0
         return results
 
-# ================= 并行任务函数 (修正版) =================
+# ================= 线程任务函数 (仅搜参) =================
 
-def process_subgroup(gpu_id: int, indices_subset: Dict, all_data: pd.DataFrame, p_name: str, 
-                     val_start: str, val_end: str, test_start: str, test_end: str,
-                     predictor: ThreadSafePredictor, optimizer: ParameterOptimizer):
+def run_search_on_gpu(gpu_id: int, indices_subset: Dict, all_data: pd.DataFrame, 
+                      val_start: str, val_end: str, predictor: KronosPredictor, optimizer: ParameterOptimizer):
     """
-    单个 GPU 的工作流程
+    只负责搜参，不负责推理
     """
-    target_device = f"cuda:{gpu_id}"
+    val_start_dt = pd.to_datetime(val_start)
+    val_end_dt = pd.to_datetime(val_end)
     
-    # ⚠️ 双重保险: 整个任务块都在正确的 device context 下运行
-    with torch.cuda.device(gpu_id):
-        # 1. 准备验证数据
-        val_start_dt = pd.to_datetime(val_start)
-        val_end_dt = pd.to_datetime(val_end)
-        
-        val_data_slice = {}
-        max_lb = max(PARAM_SEARCH_SPACE['lookback'])
-        history_buffer = pd.Timedelta(days=max_lb * 2)
-        
-        for name, symbol in indices_subset.items():
-            df = all_data[all_data['代码'] == symbol].copy()
-            mask = (df["时间"] >= (val_start_dt - history_buffer)) & (df["时间"] <= val_end_dt)
-            slice_df = df[mask].rename(columns={
-                "时间": "date", "开盘价(元)": "open", "最高价(元)": "high", 
-                "最低价(元)": "low", "收盘价(元)": "close", "成交量(万股)": "volume"
-            }).reset_index(drop=True)
-            if not slice_df.empty:
-                val_data_slice[name] = slice_df
+    val_data_slice = {}
+    max_lb = max(PARAM_SEARCH_SPACE['lookback'])
+    history_buffer = pd.Timedelta(days=max_lb * 2)
+    
+    for name, symbol in indices_subset.items():
+        df = all_data[all_data['代码'] == symbol].copy()
+        mask = (df["时间"] >= (val_start_dt - history_buffer)) & (df["时间"] <= val_end_dt)
+        slice_df = df[mask].rename(columns={
+            "时间": "date", "开盘价(元)": "open", "最高价(元)": "high", 
+            "最低价(元)": "low", "收盘价(元)": "close", "成交量(万股)": "volume"
+        }).reset_index(drop=True)
+        if not slice_df.empty:
+            val_data_slice[name] = slice_df
 
-        # 2. 参数搜索
-        best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
-        
-        # 3. 推理
-        local_metrics = []
-        local_preds = {} 
-        
-        for name, symbol in indices_subset.items():
-            my_params = best_params_map.get(name, best_params_map.get(list(best_params_map.keys())[0]))
-            
-            idx_config = CONFIG.copy()
-            idx_config.update(my_params)
-            idx_config["test_start"] = test_start
-            idx_config["test_end"] = test_end
-            idx_config["device"] = target_device # 告诉 run_batch_inference 也要用这个设备
-            
-            single_index_dict = {name: symbol}
-            
-            # 运行推理 (predictor 已经被 wrapper 保护)
-            p_metrics, p_results = run_batch_inference(
-                predictor=predictor,
-                all_data=all_data,
-                indices_dict=single_index_dict,
-                config=idx_config,
-                output_dir=OUTPUT_DIR,
-                model_name=f"rolling_{p_name}_{name}", 
-                preprocess_fn=preprocess_window_finetuned,
-                denormalize_fn=denormalize,
-            )
-            
-            for m in p_metrics:
-                m["period"] = p_name
-                m["best_T"] = my_params["T"]
-                m["best_LB"] = my_params["lookback"]
-                
-            local_metrics.extend(p_metrics)
-            if name in p_results:
-                local_preds[name] = p_results[name]
-                
-        return local_metrics, local_preds, best_params_map
+    # 执行搜参
+    return optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
 
 # ================= 主流程 =================
 
-def run_rolling_system_dual_gpu():
+def run_hybrid_system():
     print("="*60)
-    print("🚀 微调版 Kronos 滚动择时系统 (双卡并行·最终修正版)")
+    print("🚀 微调版 Kronos 滚动择时系统 (混合加速版)")
+    print("   策略: 双卡并行搜参 + 单卡串行推理")
     print("="*60)
     
     # 1. 加载数据
@@ -267,37 +203,29 @@ def run_rolling_system_dual_gpu():
     all_data = read_test_data()
     all_data["时间"] = pd.to_datetime(all_data["时间"])
     
-    # 2. 初始化双卡模型
+    # 2. 初始化双路模型 (用于搜参)
     print("\n[2/5] 初始化双路模型 (cuda:0 & cuda:1)...")
-    predictors = {}
-    optimizers = {}
+    search_predictors = {}
+    search_optimizers = {}
     
     tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
     
     for gpu_id in CONFIG["gpu_ids"]:
         device = f"cuda:{gpu_id}"
-        print(f"   ⚙️ Loading model on {device}...")
+        print(f"   ⚙️ Loading Search Model on {device}...")
         try:
-            # 在加载模型时就强制指定 device context，防止权重乱跑
-            with torch.cuda.device(gpu_id):
-                model = Kronos.from_pretrained(CONFIG['model_path']).to(device)
-                raw_pred = KronosPredictor(model, tokenizer, device=device, max_context=512)
-                
-                # 使用 Wrapper 包裹
-                safe_pred = ThreadSafePredictor(raw_pred, gpu_id)
-                
-                # 优化器使用 safe_pred
-                opt = ParameterOptimizer(safe_pred, CONFIG, gpu_id)
-                
-                predictors[gpu_id] = safe_pred
-                optimizers[gpu_id] = opt
+            # 这里的模型用于搜参
+            model = Kronos.from_pretrained(CONFIG['model_path']).to(device)
+            pred = KronosPredictor(model, tokenizer, device=device, max_context=512)
+            opt = ParameterOptimizer(pred, CONFIG, gpu_id)
+            
+            search_predictors[gpu_id] = pred
+            search_optimizers[gpu_id] = opt
         except Exception as e:
             print(f"   ❌ Failed to load on {device}: {e}")
-            import traceback
-            traceback.print_exc()
             return
 
-    # 3. 分配任务
+    # 3. 任务分配
     all_indices_list = list(INDICES.items())
     mid_point = len(all_indices_list) // 2 + 1
     indices_groups = {
@@ -305,10 +233,6 @@ def run_rolling_system_dual_gpu():
         1: dict(all_indices_list[mid_point:])
     }
     
-    print(f"\n   📋 任务分配:")
-    print(f"   GPU 0: {list(indices_groups[0].keys())}")
-    print(f"   GPU 1: {list(indices_groups[1].keys())}")
-
     rolling_periods = [
         ("2025.01", "2024-12-01", "2024-12-31", "2025-01-01", "2025-01-31"),
         ("2025.02", "2025-01-01", "2025-01-31", "2025-02-01", "2025-02-28"),
@@ -325,48 +249,95 @@ def run_rolling_system_dual_gpu():
     global_pred_buffers = {name: [] for name in INDICES.keys()}
     global_params_history = [] 
 
-    # 4. 双卡并行滚动
-    print("\n[3/5] 开始并行滚动推理...")
+    # 4. 滚动执行
+    print("\n[3/5] 开始滚动流程...")
     
+    # 线程池只用于搜参
     with ThreadPoolExecutor(max_workers=len(CONFIG["gpu_ids"])) as executor:
+        
         for p_name, val_start, val_end, test_start, test_end in rolling_periods:
-            print(f"\n📅 周期: {p_name} (Parallel)")
+            print(f"\n📅 周期: {p_name}")
             
+            # === STEP 1: 双卡并行搜参 ===
+            # 这部分是最耗时的，我们并行跑
             futures = []
             for gpu_id in CONFIG["gpu_ids"]:
                 future = executor.submit(
-                    process_subgroup,
+                    run_search_on_gpu,
                     gpu_id=gpu_id,
                     indices_subset=indices_groups[gpu_id],
                     all_data=all_data,
-                    p_name=p_name,
                     val_start=val_start,
                     val_end=val_end,
-                    test_start=test_start,
-                    test_end=test_end,
-                    predictor=predictors[gpu_id],
-                    optimizer=optimizers[gpu_id]
+                    predictor=search_predictors[gpu_id],
+                    optimizer=search_optimizers[gpu_id]
                 )
                 futures.append(future)
             
-            period_params_map = {}
+            # 收集参数结果
+            current_period_best_params = {}
             for future in futures:
                 try:
-                    loc_metrics, loc_preds, loc_params = future.result()
-                    all_metrics_buffer.extend(loc_metrics)
-                    for name, df in loc_preds.items():
-                        global_pred_buffers[name].append(df)
-                    period_params_map.update(loc_params)
+                    partial_params = future.result()
+                    current_period_best_params.update(partial_params)
                 except Exception as e:
-                    print(f"   ❌ Thread error: {e}")
+                    print(f"   ❌ Search failed: {e}")
                     import traceback
                     traceback.print_exc()
+            
+            global_params_history.append(current_period_best_params)
+            
+            # === STEP 2: 单卡串行推理 (使用 GPU 0 的模型) ===
+            # 推理很快，没必要并行，避免复杂的 device 问题
+            # 我们复用 search_predictors[0] 作为推理模型
+            inference_predictor = search_predictors[0]
+            
+            # 打印本期优选结果
+            print(f"   🏆 参数优选完成 -> 开始推理 ({test_start} ~ {test_end})")
+            
+            for name, symbol in INDICES.items():
+                # 获取该指数的参数
+                my_params = current_period_best_params.get(name)
+                if not my_params:
+                    # 兜底
+                    my_params = {"T": CONFIG["T"], "top_p": CONFIG["top_p"], "lookback": CONFIG["lookback"]}
+                
+                # 构造 config (强制指定 device 为 cuda:0)
+                idx_config = CONFIG.copy()
+                idx_config.update(my_params)
+                idx_config["test_start"] = test_start
+                idx_config["test_end"] = test_end
+                idx_config["device"] = "cuda:0" # 强制单卡推理
+                
+                single_index_dict = {name: symbol}
+                
+                # 调用原始 run_batch_inference (安全无毒)
+                # 显式切换到 cuda:0 上下文，虽然 config 已经指定了，但双重保险
+                with torch.cuda.device(0):
+                    p_metrics, p_results = run_batch_inference(
+                        predictor=inference_predictor,
+                        all_data=all_data,
+                        indices_dict=single_index_dict,
+                        config=idx_config,
+                        output_dir=OUTPUT_DIR,
+                        model_name=f"temp_{p_name}_{name}", 
+                        preprocess_fn=preprocess_window_finetuned,
+                        denormalize_fn=denormalize,
+                    )
+                
+                # 收集结果
+                for m in p_metrics:
+                    m["period"] = p_name
+                    m["best_T"] = my_params["T"]
+                    m["best_LB"] = my_params["lookback"]
+                all_metrics_buffer.extend(p_metrics)
+                
+                if name in p_results:
+                    global_pred_buffers[name].append(p_results[name])
 
-            print(f"   🏆 {p_name} 完成")
-            global_params_history.append(period_params_map)
-
-    # 5. 汇总
+    # 5. 汇总、拼接与保存
     print("\n[4/5] 汇总数据与绘图...")
+    
     final_full_predictions = {}
     for name, df_list in global_pred_buffers.items():
         if df_list:
@@ -379,7 +350,12 @@ def run_rolling_system_dual_gpu():
     aggregate_and_save_metrics(all_metrics_buffer, OUTPUT_DIR, "rolling_all")
     plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
     
-    print(f"\n✅ 全部完成! 输出: {OUTPUT_DIR}")
+    # 保存参数历史
+    history_path = os.path.join(OUTPUT_DIR, "rolling_params_history.json")
+    with open(history_path, 'w') as f:
+        json.dump(global_params_history, f, indent=2, default=str)
+    
+    print(f"\n✅ 全部完成! 输出目录: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
-    run_rolling_system_dual_gpu()
+    run_hybrid_system()
