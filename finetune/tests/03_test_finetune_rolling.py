@@ -191,12 +191,17 @@ class ParameterOptimizer:
                 results[name] = -1.0
                 continue
             
-            sample_size = 4
-            if len(valid_indices) > sample_size:
-                step = len(valid_indices) // sample_size
-                sampled_indices = valid_indices[::step]
+            total_days = len(valid_indices)
+            
+            if total_days <= 40:
+                # 验证集很短时，为了 IC 准确，每一天都测
+                step = 1
             else:
-                sampled_indices = valid_indices
+                # 验证集很长时，为了速度，限制最大样本数约为 20
+                target_samples = 20
+                step = max(1, total_days // target_samples)
+            
+            sampled_indices = valid_indices[::step]
 
             idx_preds, idx_actuals = [], []
             for idx in sampled_indices:
