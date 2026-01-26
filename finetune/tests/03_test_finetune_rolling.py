@@ -465,6 +465,9 @@ def run_rolling_system():
         else:
             print("   ⚠️ Metrics Buffer 为空，跳过汇总")
         
+        print(f"\n🎨 正在为 {len(final_full_predictions)} 个指数生成图表...")
+        plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
+        
         # 保存搜参历史详情
         optimizer.save_history(OUTPUT_DIR)
         optimizer.plot_evolution(OUTPUT_DIR)
