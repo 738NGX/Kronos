@@ -25,7 +25,6 @@ from testutils.test_utils import (
     run_batch_inference,
     aggregate_and_save_metrics,
     plot_all_results,
-    parse_test_args
 )
 from testutils.common_config import INDICES
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
@@ -89,154 +88,150 @@ class ParameterOptimizer:
         param_space: Dict,
         val_start: pd.Timestamp,
         val_end: pd.Timestamp
-    ) -> Dict:
+    ) -> Dict[str, Dict]:
         """
-        对验证集进行参数网格搜索，寻找 Spearman IC 最高的参数组合
+        对验证集进行参数网格搜索
+        为每一个指数独立寻找 IC 最高的参数组合
         """
-        print(f"\n🔍 [参数优化] 目标: 最大化收益率 IC | 区间: {val_start.date()} ~ {val_end.date()}")
+        print(f"\n🔍 [独立参数优化] 为9个指数分别寻找最佳参数 | 区间: {val_start.date()} ~ {val_end.date()}")
 
-        # 1. 动态过滤无效 lookback
+        # 1. 动态过滤 lookback (逻辑保持不变)
         min_data_len = min(len(df) for df in val_data.values())
-        # 预留一点缓冲，确保有足够数据构建上下文
-        max_lookback_allowed = min_data_len - self.config["pred_len"] - 5 
-        
+        max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
         filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
+        
         if not filtered_lookbacks:
-            print(f"   ⚠️ 数据过短，无法搜索 lookback (Max allowed: {max_lookback_allowed})，使用默认值 60")
-            filtered_lookbacks = [60]
-            
+            print(f"   ⚠️ 数据过短，使用默认 lookback=30")
+            filtered_lookbacks = [30]
+
         final_space = {
             "T": param_space["T"],
             "top_p": param_space["top_p"],
             "lookback": filtered_lookbacks
         }
         
-        # 生成参数组合
         param_names = list(final_space.keys())
         param_combinations = list(product(*final_space.values()))
         
-        print(f"   ⚙️ 搜索组合数: {len(param_combinations)} | 🚀 启用稀疏采样加速")
+        print(f"   ⚙️ 组合数: {len(param_combinations)} | 🎯 策略: 独立择优 (One-Pass Independent Selection)")
 
-        best_params = None
-        best_ic = -2.0  # 初始 IC 设为极小值 (IC 范围 -1 到 1)
-        
-        # 2. 遍历参数
-        # 使用 tqdm 显示进度
-        for combo in tqdm(param_combinations, desc="   搜索进度", leave=False, ncols=100):
+        # === 核心修改: 为每个指数初始化最佳记录 ===
+        # 结构: {"上证50": -2.0, "沪深300": -2.0, ...}
+        best_ic_map = {name: -2.0 for name in val_data.keys()}
+        # 结构: {"上证50": {T:.., lookback:..}, ...}
+        best_params_map = {name: None for name in val_data.keys()}
+
+        # 2. 遍历所有参数组合
+        for combo in tqdm(param_combinations, desc="   参数搜索", leave=False, ncols=100):
             params = dict(zip(param_names, combo))
             
-            # 评估该组参数的 IC
-            try:
-                ic_score = self._evaluate_params_ic(val_data, params, val_start, val_end)
-            except Exception as e:
-                # 容错处理，防止单次报错中断整个流程
-                ic_score = -1.0
+            # 计算该参数在各个指数上的 IC
+            # 返回字典: {"上证50": 0.15, "沪深300": 0.02, ...}
+            scores_dict = self._evaluate_params_per_index(val_data, params, val_start, val_end)
             
-            # 更新最优解
-            if ic_score > best_ic:
-                best_ic = ic_score
-                best_params = params.copy()
+            # 独立更新每个指数的最佳参数
+            for name, score in scores_dict.items():
+                if score > best_ic_map[name]:
+                    best_ic_map[name] = score
+                    best_params_map[name] = params.copy()
         
-        # 兜底逻辑
-        if best_params is None:
-            best_params = {k: v[0] for k,v in final_space.items()}
-            print("   ⚠️ 所有参数评估失败，使用默认值")
+        # 3. 结果汇总与兜底
+        print("\n   🏆 各指数最优参数结果:")
+        default_params = {k: v[0] for k, v in final_space.items()}
+        
+        for name in val_data.keys():
+            if best_params_map[name] is None:
+                best_params_map[name] = default_params
+                print(f"     ❌ {name}: 优化失败，使用默认")
+            else:
+                p = best_params_map[name]
+                ic = best_ic_map[name]
+                print(f"     ✅ {name}: IC={ic:.4f} | T={p['T']}, LB={p['lookback']}")
+                
+        # 记录优化历史 (简化存储，仅存 IC 均值或结构化数据)
+        self.rolling_params_history.append(best_params_map)
+        
+        return best_params_map
 
-        # 记录历史
-        self.rolling_params_history.append(best_params)
-        self.optimization_details.append({
-            "period_idx": len(self.rolling_params_history),
-            "best_params": best_params,
-            "best_ic": best_ic
-        })
-        
-        print(f"   ✅ 优选参数: T={best_params['T']}, top_p={best_params['top_p']}, "
-              f"Lookback={best_params['lookback']} | 🏆 IC={best_ic:.4f}")
-        
-        return best_params
-    
-    def _evaluate_params_ic(
+    def _evaluate_params_per_index(
         self, 
         val_data: Dict[str, pd.DataFrame], 
         params: Dict, 
         val_start: pd.Timestamp, 
         val_end: pd.Timestamp
-    ) -> float:
+    ) -> Dict[str, float]:
         """
-        计算给定参数下的收益率 Spearman Correlation (Rank IC)
-        性能优化：采用稀疏采样 (Sparse Sampling)
+        计算给定参数在每个指数上的独立 IC
         """
         lookback = params["lookback"]
         pred_len = self.config["pred_len"]
         
-        all_pred_returns = []
-        all_true_returns = []
+        results = {}
         
-        # 遍历每个指数
+        # 遍历所有指数 (不再使用代理指数，必须全跑)
         for name, df in val_data.items():
-            # 筛选验证区间
             mask = (df["date"] >= val_start) & (df["date"] <= val_end - pd.Timedelta(days=pred_len))
             valid_indices = df[mask].index.tolist()
             
             if not valid_indices:
+                results[name] = -1.0
                 continue
-                
-            # === ⚡️ 速度优化关键点 ===
-            # 不要跑完所有天数，每个指数最多只采样 8 个点进行评估
-            # 这足以代表该参数在当前市场环境下的表现，速度提升 10 倍以上
-            sample_size = 8
+            
+            # === 稀疏采样 (保持每指数采样4个点，保证速度) ===
+            sample_size = 4
             if len(valid_indices) > sample_size:
                 step = len(valid_indices) // sample_size
                 sampled_indices = valid_indices[::step]
             else:
                 sampled_indices = valid_indices
 
+            idx_preds = []
+            idx_actuals = []
+
             for idx in sampled_indices:
                 if idx < lookback: continue
                 
-                # 构造输入
-                input_df = df.iloc[idx - lookback : idx + 1]
+                # logic: lookback - 1
+                real_input_len = lookback - 1
+                input_df = df.iloc[idx - real_input_len + 1 : idx + 1]
                 
-                # 运行推理 (强制 sample_count=1 以加速)
-                with torch.no_grad():
-                    pred_df = self.predictor.predict(
-                        df=input_df,
-                        x_timestamp=input_df["date"],
-                        y_timestamp=df.iloc[idx + 1 : idx + 1 + pred_len]["date"],
-                        pred_len=pred_len,
-                        T=params["T"],
-                        top_p=params["top_p"],
-                        sample_count=1,  # 搜索阶段仅采样一次
-                        verbose=False
-                    )
+                if len(input_df) != real_input_len: continue
                 
-                # 获取预测值和真实值 (T+1 到 T+N 的平均收益率，平滑噪音)
-                # 使用收益率而非绝对价格，计算 IC 更准确
-                current_price = input_df.iloc[-1]["close"]
-                
-                # 计算预测的累积收益率 (Last Pred Price / Current Price - 1)
-                pred_price_end = pred_df.iloc[-1]["close"]
-                pred_ret = (pred_price_end - current_price) / current_price
-                
-                # 计算真实的累积收益率
-                true_price_end = df.iloc[idx + pred_len]["close"]
-                true_ret = (true_price_end - current_price) / current_price
-                
-                all_pred_returns.append(pred_ret)
-                all_true_returns.append(true_ret)
+                try:
+                    with torch.no_grad():
+                        pred_df = self.predictor.predict(
+                            df=input_df,
+                            x_timestamp=input_df["date"],
+                            y_timestamp=df.iloc[idx + 1 : idx + 1 + pred_len]["date"],
+                            pred_len=pred_len,
+                            T=params["T"],
+                            top_p=params["top_p"],
+                            sample_count=1,
+                            verbose=False
+                        )
+                    
+                    # 收益率计算
+                    curr = input_df.iloc[-1]["close"]
+                    pred = (pred_df.iloc[-1]["close"] - curr) / curr
+                    act = (df.iloc[idx + pred_len]["close"] - curr) / curr
+                    
+                    idx_preds.append(pred)
+                    idx_actuals.append(act)
+                    
+                except Exception:
+                    continue
 
-        # 计算 Spearman IC
-        if len(all_pred_returns) < 5:
-            return -1.0 # 样本过少
-            
-        try:
-            # 传入数组需为一维
-            corr, _ = spearmanr(all_true_returns, all_pred_returns)
-            if np.isnan(corr):
-                return -1.0
-            return corr
-        except:
-            return -1.0
+            # 计算该指数的 IC
+            if len(idx_preds) < 2: # 样本过少
+                results[name] = -1.0
+            else:
+                try:
+                    corr, _ = spearmanr(idx_actuals, idx_preds)
+                    results[name] = -1.0 if np.isnan(corr) else corr
+                except:
+                    results[name] = -1.0
+                    
+        return results
 
     def save_history(self, output_dir: str):
         path = os.path.join(output_dir, "rolling_params_history.json")
@@ -279,6 +274,8 @@ def run_rolling_system():
     # 1. 加载数据
     print("\n[1/4] 加载全量测试数据...")
     all_data = read_test_data()
+    
+    all_data["时间"] = pd.to_datetime(all_data["时间"])
     
     # 2. 加载模型
     print("\n[2/4] 初始化模型...")
@@ -346,37 +343,50 @@ def run_rolling_system():
                 val_data_slice[name] = slice_df
 
         # --- A. 参数搜索 (搜参) ---
-        best_params = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
+        # 此时返回的是 map: {"上证50": {params...}, "沪深300": {params...}}
+        best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
         
         # --- B. 样本外测试 (推理) ---
-        # 构造当期配置
-        current_config = CONFIG.copy()
-        current_config.update(best_params)
-        
-        # 设置当前周期的测试时间
-        current_config["test_start"] = test_start
-        current_config["test_end"] = test_end
-        
         print(f"   Running Inference: {test_start} -> {test_end}")
         
-        # 批量推理
-        p_metrics, p_results = run_batch_inference(
-            predictor=predictor,
-            all_data=all_data,
-            indices_dict=INDICES,
-            config=current_config,
-            output_dir=OUTPUT_DIR,
-            model_name=f"rolling_{p_name}",
-            preprocess_fn=preprocess_window_finetuned,
-            denormalize_fn=denormalize
-        )
+        current_metrics = []
         
-        # 标记周期
-        for m in p_metrics:
-            m["period"] = p_name
+        # 遍历所有指数，使用其专属参数进行预测
+        for name, symbol in INDICES.items():
+            # 获取该指数的专属参数 (如果没找到，用第一个作为兜底)
+            my_params = best_params_map.get(name, best_params_map.get(list(best_params_map.keys())[0]))
             
-        all_metrics.extend(p_metrics)
-        all_results.update(p_results)
+            # 构造专属 config
+            idx_config = CONFIG.copy()
+            idx_config.update(my_params)
+            idx_config["test_start"] = test_start
+            idx_config["test_end"] = test_end
+            
+            # 构造单指数的 indices_dict
+            single_index_dict = {name: symbol}
+            
+            # 运行单个指数的推理
+            p_metrics, p_results = run_batch_inference(
+                predictor=predictor,
+                all_data=all_data,
+                indices_dict=single_index_dict,
+                config=idx_config,
+                output_dir=OUTPUT_DIR,
+                model_name=f"rolling_{p_name}_{name}", 
+                preprocess_fn=preprocess_window_finetuned,
+                denormalize_fn=denormalize
+            )
+            
+            # 补充周期信息
+            for m in p_metrics:
+                m["period"] = p_name
+                m["best_T"] = my_params["T"]
+                m["best_LB"] = my_params["lookback"]
+            
+            current_metrics.extend(p_metrics)
+            all_results.update(p_results)
+            
+        all_metrics.extend(current_metrics)
 
     # 5. 保存与绘图
     print("\n[4/4] 保存最终结果...")
