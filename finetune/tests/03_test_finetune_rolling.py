@@ -1,9 +1,3 @@
-"""
-微调版 Kronos 滚动择时系统 (最终完整版)
-- 核心功能：独立参数优选 + 全局结果拼接 + 完整绘图
-- 修复：解决了结果覆盖导致无法画图的问题，增加了按指数合并CSV的功能
-"""
-
 import os
 import json
 import numpy as np
@@ -34,6 +28,28 @@ setup_environment()
 
 from model import Kronos, KronosTokenizer, KronosPredictor
 
+import torch.distributed as dist
+
+def init_distributed_mode():
+    """初始化分布式环境，如果不是通过 torchrun 启动，则默认单卡运行"""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        
+        # 核心：将当前进程绑定到指定的 GPU，防止张量乱跑
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl", init_method="env://")
+        
+        print(f"🔥 [DDP] 进程启动: Global Rank {rank} | Local Rank {local_rank} | Total {world_size}")
+        return rank, local_rank, world_size
+    else:
+        print("⚠️ [Single] 单卡模式运行")
+        return 0, 0, 1
+
+# 在 setup_environment() 之后立即调用
+rank, local_rank, world_size = init_distributed_mode()
+
 # ================= 配置区域 =================
 
 CONFIG = {
@@ -46,7 +62,7 @@ CONFIG = {
     "sample_count": 10,
     "test_start": "2025-01-01",
     "test_end": "2025-09-30",
-    "device": "cuda:0",
+    "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu",
     "feature_cols": ["open", "high", "low", "close", "volume"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
     "clip_val": 3.0
@@ -72,43 +88,85 @@ class ParameterOptimizer:
         self.optimization_details = []
     
     def grid_search(self, val_data: Dict[str, pd.DataFrame], param_space: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> Dict[str, Dict]:
-        print(f"\n🔍 [独立参数优化] 区间: {val_start.date()} ~ {val_end.date()}")
+        # 仅主进程打印大的日志
+        if rank == 0:
+            print(f"\n🔍 [独立参数优化] 区间: {val_start.date()} ~ {val_end.date()}")
+
+        # ... (保留原有的 lookback 过滤逻辑) ...
         min_data_len = min(len(df) for df in val_data.values())
         max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
         filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
-        if not filtered_lookbacks:
-            filtered_lookbacks = [30]
+        if not filtered_lookbacks: filtered_lookbacks = [30]
 
         final_space = {"T": param_space["T"], "top_p": param_space["top_p"], "lookback": filtered_lookbacks}
         param_names = list(final_space.keys())
-        param_combinations = list(product(*final_space.values()))
+        all_combinations = list(product(*final_space.values()))
+
+        # === 🔥 并行切分核心逻辑 ===
+        # 使用切片语法：0号卡跑 [0, 2, 4...], 1号卡跑 [1, 3, 5...]
+        my_combinations = all_combinations[rank::world_size]
         
-        print(f"   ⚙️ 组合数: {len(param_combinations)} | 🎯 策略: 独立择优")
+        if rank == 0:
+            print(f"   ⚙️ 总组合数: {len(all_combinations)} | 显卡数: {world_size} | 本卡任务数: {len(my_combinations)}")
 
-        best_ic_map = {name: -2.0 for name in val_data.keys()}
-        best_params_map = {name: None for name in val_data.keys()}
+        # 本地最佳结果缓存
+        local_best_ic = {name: -2.0 for name in val_data.keys()}
+        local_best_params = {name: None for name in val_data.keys()}
 
-        for combo in tqdm(param_combinations, desc="   参数搜索", leave=False, ncols=100):
+        # 这里的 tqdm 只在 rank 0 显示，或者让它不换行
+        iterator = tqdm(my_combinations, desc=f"   GPU-{rank} 搜索", leave=False, ncols=80) if len(my_combinations) > 0 else []
+        
+        for combo in iterator:
             params = dict(zip(param_names, combo))
+            # 运行评估 (逻辑不变)
             scores_dict = self._evaluate_params_per_index(val_data, params, val_start, val_end)
+            
             for name, score in scores_dict.items():
-                if score > best_ic_map[name]:
-                    best_ic_map[name] = score
-                    best_params_map[name] = params.copy()
+                if score > local_best_ic[name]:
+                    local_best_ic[name] = score
+                    local_best_params[name] = params.copy()
+
+        # === 🔥 结果汇总逻辑 (All Gather) ===
+        # 将所有 GPU 的结果收集到一起
+        # 结构: [[{name: params}, {name: ic}], [...], ...]
+        my_result = (local_best_params, local_best_ic)
+        all_results_list = [None for _ in range(world_size)]
         
-        print("\n   🏆 各指数最优参数结果:")
-        default_params = {k: v[0] for k, v in final_space.items()}
-        for name in val_data.keys():
-            if best_params_map[name] is None:
-                best_params_map[name] = default_params
-                print(f"     ❌ {name}: 优化失败，使用默认")
-            else:
-                p = best_params_map[name]
-                ic = best_ic_map[name]
-                print(f"     ✅ {name}: IC={ic:.4f} | T={p['T']}, LB={p['lookback']}")
-                
-        self.rolling_params_history.append(best_params_map)
-        return best_params_map
+        if world_size > 1:
+            dist.all_gather_object(all_results_list, my_result)
+        else:
+            all_results_list = [my_result]
+
+        # 只有 Rank 0 需要处理汇总逻辑并返回
+        if rank == 0:
+            final_best_params = {name: None for name in val_data.keys()}
+            final_best_ic = {name: -2.0 for name in val_data.keys()}
+
+            # 遍历所有卡的结果，选出全局最强
+            for gpu_params, gpu_ics in all_results_list:
+                for name in val_data.keys():
+                    if gpu_ics[name] > final_best_ic[name]:
+                        final_best_ic[name] = gpu_ics[name]
+                        final_best_params[name] = gpu_params[name]
+            
+            # 打印最终结果
+            print("\n   🏆 [全局汇总] 各指数最优参数:")
+            default_params = {k: v[0] for k, v in final_space.items()}
+            for name in val_data.keys():
+                if final_best_params[name] is None:
+                    final_best_params[name] = default_params
+                    print(f"     ❌ {name}: 优化失败，使用默认")
+                else:
+                    p = final_best_params[name]
+                    ic = final_best_ic[name]
+                    print(f"     ✅ {name}: IC={ic:.4f} | T={p['T']}, LB={p['lookback']}")
+            
+            self.rolling_params_history.append(final_best_params)
+            return final_best_params
+        
+        else:
+            # 非 Rank 0 进程返回空即可，反正外面会通过 rank==0 判断
+            return {}
 
     def _evaluate_params_per_index(self, val_data, params, val_start, val_end):
         lookback = params["lookback"]
@@ -254,6 +312,14 @@ def run_rolling_system():
 
         # --- A. 参数搜索 ---
         best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
+        
+        # ⚠️ 必须加同步屏障，等待所有显卡搜完
+        if world_size > 1:
+            dist.barrier() 
+
+        # === 🛑 关键：只允许 Rank 0 进行后续的推理、绘图和保存 ===
+        if rank != 0:
+            return # 其他显卡在此处完成当月任务，直接退出本次循环，等待下一月
         
         # --- B. 样本外测试 ---
         print(f"   Running Inference: {test_start} -> {test_end}")
