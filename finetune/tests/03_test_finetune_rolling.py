@@ -373,52 +373,53 @@ def run_rolling_system():
                 global_pred_buffers[name].append(p_results[name])
 
     # 4. 汇总、拼接与保存
-    print("\n[4/4] 汇总数据与绘图...")
-    
-    # === 🔴 核心修改 2: 拼接所有月份的预测结果 ===
-    final_full_predictions = {}
-    
-    for name, df_list in global_pred_buffers.items():
-        if df_list:
-            # 纵向拼接该指数所有月份的预测
-            full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
-            final_full_predictions[name] = full_df
-            
-            # 保存该指数的完整 CSV
-            save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
-            full_df.to_csv(save_path, index=False)
-            print(f"   💾 已保存完整预测: {save_path} (Rows: {len(full_df)})")
-        else:
-            print(f"   ⚠️ 未收集到指数 {name} 的预测数据")
+    if rank == 0:
+        print("\n[4/4] 汇总数据与绘图...")
+        
+        # === 🔴 核心修改 2: 拼接所有月份的预测结果 ===
+        final_full_predictions = {}
+        
+        for name, df_list in global_pred_buffers.items():
+            if df_list:
+                # 纵向拼接该指数所有月份的预测
+                full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
+                final_full_predictions[name] = full_df
+                
+                # 保存该指数的完整 CSV
+                save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
+                full_df.to_csv(save_path, index=False)
+                print(f"   💾 已保存完整预测: {save_path} (Rows: {len(full_df)})")
+            else:
+                print(f"   ⚠️ 未收集到指数 {name} 的预测数据")
 
-    # === 🔴 核心修改 3 (修复版): 分离明细保存与汇总展示 ===
-    
-    # 1. 转换为 DataFrame
-    df_metrics = pd.DataFrame(all_metrics_buffer)
-    
-    # 2. 保存“分月明细” CSV (这个文件包含每个月的 best_T, best_LB, IC 等详情)
-    detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
-    df_metrics.to_csv(detail_save_path, index=False)
-    print(f"   💾 已保存分月明细指标: {detail_save_path}")
+        # === 🔴 核心修改 3 (修复版): 分离明细保存与汇总展示 ===
+        
+        # 1. 转换为 DataFrame
+        df_metrics = pd.DataFrame(all_metrics_buffer)
+        
+        # 2. 保存“分月明细” CSV (这个文件包含每个月的 best_T, best_LB, IC 等详情)
+        detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
+        df_metrics.to_csv(detail_save_path, index=False)
+        print(f"   💾 已保存分月明细指标: {detail_save_path}")
 
-    # 3. 计算“全周期平均值” (Groupby Index + Horizon)
-    # 注意：numeric_only=True 会自动忽略 'period' 等字符串列，只对 IC/RankIC 等数值求均值
-    df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
-    
-    # 4. 将平均值传给汇总函数生成图表和最终 Summary
-    # 这样 pivot 就不会报错了，因为每个 Index 现在只有一行数据
-    avg_metrics_list = df_avg.to_dict('records')
-    aggregate_and_save_metrics(avg_metrics_list, OUTPUT_DIR, "rolling_all_avg")
-    
-    # === 🔴 核心修改 4: 传入完整的 DataFrames 进行绘图 ===
-    # 现在 final_full_predictions 里的每个 DF 都是 1月-9月的完整数据
-    # plot_all_results 内部会根据这些数据画出完整的连贯曲线
-    plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
-    
-    optimizer.save_history(OUTPUT_DIR)
-    optimizer.plot_evolution(OUTPUT_DIR)
-    
-    print(f"\n✅ 全部完成! 输出目录: {OUTPUT_DIR}")
+        # 3. 计算“全周期平均值” (Groupby Index + Horizon)
+        # 注意：numeric_only=True 会自动忽略 'period' 等字符串列，只对 IC/RankIC 等数值求均值
+        df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
+        
+        # 4. 将平均值传给汇总函数生成图表和最终 Summary
+        # 这样 pivot 就不会报错了，因为每个 Index 现在只有一行数据
+        avg_metrics_list = df_avg.to_dict('records')
+        aggregate_and_save_metrics(avg_metrics_list, OUTPUT_DIR, "rolling_all_avg")
+        
+        # === 🔴 核心修改 4: 传入完整的 DataFrames 进行绘图 ===
+        # 现在 final_full_predictions 里的每个 DF 都是 1月-9月的完整数据
+        # plot_all_results 内部会根据这些数据画出完整的连贯曲线
+        plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
+        
+        optimizer.save_history(OUTPUT_DIR)
+        optimizer.plot_evolution(OUTPUT_DIR)
+        
+        print(f"\n✅ 全部完成! 输出目录: {OUTPUT_DIR}")
 
 if __name__ == "__main__":
     run_rolling_system()
