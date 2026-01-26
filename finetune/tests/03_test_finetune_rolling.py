@@ -449,20 +449,21 @@ def run_rolling_system():
         if all_metrics_buffer:
             print(f"   📊 正在合并 {len(all_metrics_buffer)} 个分片 Metrics...")
             
+            # 1. 纵向拼接所有分片
             df_metrics = pd.concat(all_metrics_buffer, ignore_index=True)
             
+            # 2. 保存明细
             detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
             df_metrics.to_csv(detail_save_path, index=False)
             print(f"   💾 已保存分月明细指标: {detail_save_path}")
 
+            # 3. 计算平均
             df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
-            avg_metrics_list = df_avg.to_dict('records')
-
-            aggregate_and_save_metrics(avg_metrics_list, OUTPUT_DIR, "rolling_all_avg")
+            
+            aggregate_and_save_metrics([df_avg], OUTPUT_DIR, "rolling_all_avg")
+            
         else:
             print("   ⚠️ Metrics Buffer 为空，跳过汇总")
-        
-        plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
         
         # 保存搜参历史详情
         optimizer.save_history(OUTPUT_DIR)
