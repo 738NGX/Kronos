@@ -173,7 +173,7 @@ class ParameterOptimizer:
         path = os.path.join(output_dir, f"rolling_params_history_gpu{self.device_id}.json")
         with open(path, 'w') as f: json.dump(self.rolling_params_history, f, indent=2, default=str)
 
-# ================= 并行任务函数 =================
+# ================= 并行任务函数 (修正版) =================
 
 def process_subgroup(
     gpu_id: int,
@@ -188,13 +188,15 @@ def process_subgroup(
     optimizer: ParameterOptimizer
 ):
     """
-    单个 GPU 的工作流程：
-    1. 准备该 GPU 负责的指数数据
-    2. 运行参数搜索
-    3. 运行推理
-    4. 返回结果
+    单个 GPU 的工作流程 (修复设备冲突版)
     """
-    # 1. 准备验证数据
+    target_device = f"cuda:{gpu_id}"
+    
+    # ⚠️ 关键修复 1: 强制设置 PyTorch 当前默认设备
+    # 这可以防止某些隐式创建张量的操作默认跑到 cuda:0
+    torch.cuda.set_device(gpu_id)
+    
+    # 1. 准备验证数据 (CPU操作，无所谓)
     val_start_dt = pd.to_datetime(val_start)
     val_end_dt = pd.to_datetime(val_end)
     
@@ -212,23 +214,31 @@ def process_subgroup(
         if not slice_df.empty:
             val_data_slice[name] = slice_df
 
-    # 2. 参数搜索
+    # 2. 参数搜索 (optimizer 内部已绑定 device，通常安全)
     best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
     
     # 3. 推理
     local_metrics = []
-    local_preds = {} # {name: df}
+    local_preds = {} 
     
     for name, symbol in indices_subset.items():
+        # 获取优选参数
         my_params = best_params_map.get(name, best_params_map.get(list(best_params_map.keys())[0]))
         
+        # ⚠️ 关键修复 2: 显式将 device 写入 config 并传递给 run_batch_inference
+        # 确保 testutils 内部的数据预处理知道要发往哪个 GPU
         idx_config = CONFIG.copy()
         idx_config.update(my_params)
         idx_config["test_start"] = test_start
         idx_config["test_end"] = test_end
-        idx_config["device"] = f"cuda:{gpu_id}" # 确保推理 config 指向正确设备
+        idx_config["device"] = target_device 
         
         single_index_dict = {name: symbol}
+        
+        # ⚠️ 关键修复 3: 确保 predictor 自身属性正确
+        # 虽然初始化时设了，但防止多线程共享对象时属性被意外修改
+        predictor.device = target_device
+        predictor.model.to(target_device)
         
         p_metrics, p_results = run_batch_inference(
             predictor=predictor,
