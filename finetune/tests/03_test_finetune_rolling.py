@@ -313,9 +313,24 @@ def run_rolling_system():
         else:
             print(f"   ⚠️ 未收集到指数 {name} 的预测数据")
 
-    # === 🔴 核心修改 3: 保存汇总 Metrics ===
-    # 将包含 period, best_T 等信息的完整 metrics 表保存
-    aggregate_and_save_metrics(all_metrics_buffer, OUTPUT_DIR, "rolling_all")
+    # === 🔴 核心修改 3 (修复版): 分离明细保存与汇总展示 ===
+    
+    # 1. 转换为 DataFrame
+    df_metrics = pd.DataFrame(all_metrics_buffer)
+    
+    # 2. 保存“分月明细” CSV (这个文件包含每个月的 best_T, best_LB, IC 等详情)
+    detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
+    df_metrics.to_csv(detail_save_path, index=False)
+    print(f"   💾 已保存分月明细指标: {detail_save_path}")
+
+    # 3. 计算“全周期平均值” (Groupby Index + Horizon)
+    # 注意：numeric_only=True 会自动忽略 'period' 等字符串列，只对 IC/RankIC 等数值求均值
+    df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
+    
+    # 4. 将平均值传给汇总函数生成图表和最终 Summary
+    # 这样 pivot 就不会报错了，因为每个 Index 现在只有一行数据
+    avg_metrics_list = df_avg.to_dict('records')
+    aggregate_and_save_metrics(avg_metrics_list, OUTPUT_DIR, "rolling_all_avg")
     
     # === 🔴 核心修改 4: 传入完整的 DataFrames 进行绘图 ===
     # 现在 final_full_predictions 里的每个 DF 都是 1月-9月的完整数据
