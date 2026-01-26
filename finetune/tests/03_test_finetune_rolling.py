@@ -88,11 +88,10 @@ class ParameterOptimizer:
         self.optimization_details = []
     
     def grid_search(self, val_data: Dict[str, pd.DataFrame], param_space: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> Dict[str, Dict]:
-        # 仅主进程打印大的日志
+        # 仅主进程打印大的表头
         if rank == 0:
             print(f"\n🔍 [独立参数优化] 区间: {val_start.date()} ~ {val_end.date()}")
 
-        # ... (保留原有的 lookback 过滤逻辑) ...
         min_data_len = min(len(df) for df in val_data.values())
         max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
         filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
@@ -101,72 +100,85 @@ class ParameterOptimizer:
         final_space = {"T": param_space["T"], "top_p": param_space["top_p"], "lookback": filtered_lookbacks}
         param_names = list(final_space.keys())
         all_combinations = list(product(*final_space.values()))
-
-        # === 🔥 并行切分核心逻辑 ===
-        # 使用切片语法：0号卡跑 [0, 2, 4...], 1号卡跑 [1, 3, 5...]
+        
+        # === 🔥 并行切分 ===
         my_combinations = all_combinations[rank::world_size]
+        total_tasks = len(my_combinations)
         
         if rank == 0:
-            print(f"   ⚙️ 总组合数: {len(all_combinations)} | 显卡数: {world_size} | 本卡任务数: {len(my_combinations)}")
+            print(f"   ⚙️ 总组合: {len(all_combinations)} | 显卡数: {world_size} | 单卡任务: ~{total_tasks}")
 
-        # 本地最佳结果缓存
         local_best_ic = {name: -2.0 for name in val_data.keys()}
         local_best_params = {name: None for name in val_data.keys()}
 
-        # 这里的 tqdm 只在 rank 0 显示，或者让它不换行
-        iterator = tqdm(my_combinations, desc=f"   GPU-{rank} 搜索", leave=False, ncols=80) if len(my_combinations) > 0 else []
-        
-        for combo in iterator:
+        # === 🛑 优化日志：不再使用 tqdm，改为手动间隔打印 ===
+        # 设定打印频率：每完成 20% 打印一次，或者至少每 5 个任务打印一次
+        log_interval = max(1, total_tasks // 5) 
+
+        import time
+        start_time = time.time()
+
+        for i, combo in enumerate(my_combinations):
             params = dict(zip(param_names, combo))
-            # 运行评估 (逻辑不变)
             scores_dict = self._evaluate_params_per_index(val_data, params, val_start, val_end)
             
             for name, score in scores_dict.items():
                 if score > local_best_ic[name]:
                     local_best_ic[name] = score
                     local_best_params[name] = params.copy()
+            
+            # --- 进度打印逻辑 ---
+            # 只有在特定的步数，或者完成最后一步时才打印
+            if (i + 1) % log_interval == 0 or (i + 1) == total_tasks:
+                elapsed = time.time() - start_time
+                avg_time = elapsed / (i + 1)
+                remaining = avg_time * (total_tasks - (i + 1))
+                
+                # 打印格式：[GPU-0] 进度 5/24 (20%) | 耗时 12s | 剩余 40s
+                print(f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
+                      f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)")
 
-        # === 🔥 结果汇总逻辑 (All Gather) ===
-        # 将所有 GPU 的结果收集到一起
-        # 结构: [[{name: params}, {name: ic}], [...], ...]
+        # === 🔥 结果汇总 ===
+        if rank == 0: print("   ⏳ 等待其他 GPU 完成任务...") # 提示用户进入等待阶段
+        
         my_result = (local_best_params, local_best_ic)
         all_results_list = [None for _ in range(world_size)]
         
         if world_size > 1:
-            dist.all_gather_object(all_results_list, my_result)
+            try:
+                dist.all_gather_object(all_results_list, my_result)
+            except Exception as e:
+                print(f"❌ [Rank {rank}] Gather Error: {e}")
+                all_results_list = [my_result]
         else:
             all_results_list = [my_result]
 
-        # 只有 Rank 0 需要处理汇总逻辑并返回
+        # === 决出全局最优 (仅 Rank 0) ===
         if rank == 0:
             final_best_params = {name: None for name in val_data.keys()}
             final_best_ic = {name: -2.0 for name in val_data.keys()}
 
-            # 遍历所有卡的结果，选出全局最强
             for gpu_params, gpu_ics in all_results_list:
+                if gpu_params is None: continue 
                 for name in val_data.keys():
                     if gpu_ics[name] > final_best_ic[name]:
                         final_best_ic[name] = gpu_ics[name]
                         final_best_params[name] = gpu_params[name]
             
-            # 打印最终结果
             print("\n   🏆 [全局汇总] 各指数最优参数:")
             default_params = {k: v[0] for k, v in final_space.items()}
             for name in val_data.keys():
                 if final_best_params[name] is None:
                     final_best_params[name] = default_params
-                    print(f"     ❌ {name}: 优化失败，使用默认")
                 else:
                     p = final_best_params[name]
                     ic = final_best_ic[name]
-                    print(f"     ✅ {name}: IC={ic:.4f} | T={p['T']}, LB={p['lookback']}")
+                    print(f"     ✅ {name}: IC={ic:.4f} (T={p['T']}, LB={p['lookback']})")
             
             self.rolling_params_history.append(final_best_params)
             return final_best_params
         
-        else:
-            # 非 Rank 0 进程返回空即可，反正外面会通过 rank==0 判断
-            return {}
+        return {}
 
     def _evaluate_params_per_index(self, val_data, params, val_start, val_end):
         lookback = params["lookback"]
