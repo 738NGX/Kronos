@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from tqdm import tqdm
 from scipy.stats import spearmanr
 import warnings
+import contextlib
 
 # 过滤警告
 warnings.filterwarnings('ignore')
@@ -68,6 +69,8 @@ CONFIG = {
     "clip_val": 3.0
 }
 
+PARAMS_CACHE_FILE = "/gemini/data-1/rolling_params_cache.json"
+
 # 参数搜索空间
 PARAM_SEARCH_SPACE = {
     "T": [0.3, 0.6, 0.8, 1.0],
@@ -111,8 +114,6 @@ class ParameterOptimizer:
         local_best_ic = {name: -2.0 for name in val_data.keys()}
         local_best_params = {name: None for name in val_data.keys()}
 
-        # === 🛑 优化日志：不再使用 tqdm，改为手动间隔打印 ===
-        # 设定打印频率：每完成 20% 打印一次，或者至少每 5 个任务打印一次
         log_interval = max(1, total_tasks // 5) 
 
         import time
@@ -258,7 +259,7 @@ class ParameterOptimizer:
 
 def run_rolling_system():
     print("="*60)
-    print("🚀 微调版 Kronos 滚动择时系统 (最终拼接版)")
+    print("🚀 微调版 Kronos 滚动择时系统 (最终拼接版 - 缓存优化 & 静默推理)")
     print("="*60)
     
     # 1. 加载数据
@@ -294,19 +295,27 @@ def run_rolling_system():
         ("2025.09", "2025-08-01", "2025-08-31", "2025-09-01", "2025-09-30"),
     ]
 
-    # === 🔴 核心修改 1: 初始化全局容器 ===
-    # 用于收集每一轮产生的 Metrics (DataFrame)
+    # === 初始化全局容器 ===
     all_metrics_buffer = [] 
-    
-    # 用于收集每一轮产生的 Prediction DataFrame (按指数分类缓存)
-    # 结构: { "上证50": [df_jan, df_feb...], "沪深300": [...] }
     global_pred_buffers = {name: [] for name in INDICES.keys()}
+
+    # === 🔵 缓存加载逻辑 ===
+    param_cache = {}
+    if rank == 0:
+        if os.path.exists(PARAMS_CACHE_FILE):
+            try:
+                with open(PARAMS_CACHE_FILE, 'r') as f:
+                    param_cache = json.load(f)
+                print(f"📦 [Cache] 已加载参数缓存文件: {PARAMS_CACHE_FILE}")
+            except Exception as e:
+                print(f"⚠️ [Cache] 缓存文件读取失败: {e}")
 
     # 3. 滚动执行
     print("\n[3/4] 开始滚动推理...")
     
     for p_name, val_start, val_end, test_start, test_end in rolling_periods:
-        print(f"\n📅 周期: {p_name}")
+        if rank == 0:
+            print(f"\n📅 周期: {p_name}")
         
         # 准备验证数据
         val_start_dt = pd.to_datetime(val_start)
@@ -327,19 +336,57 @@ def run_rolling_system():
             if not slice_df.empty:
                 val_data_slice[name] = slice_df
 
-        # --- A. 参数搜索 ---
-        best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
+        # --- A. 参数搜索 (带缓存检查) ---
         
-        # ⚠️ 必须加同步屏障，等待所有显卡搜完
+        # 1. 决策：Rank 0 检查是否有缓存
+        use_cache = False
+        if rank == 0:
+            if p_name in param_cache:
+                use_cache = True
+        
+        # 2. 同步：Rank 0 将决策告诉 Rank 1 (防止 Rank 1 进入 GridSearch 等待)
+        # 广播张量：1=Use Cache, 0=Search
+        decision_tensor = torch.tensor([1 if use_cache else 0], dtype=torch.int, device=CONFIG['device'])
+        if world_size > 1:
+            dist.broadcast(decision_tensor, src=0)
+        
+        should_use_cache = (decision_tensor.item() == 1)
+
+        # 3. 执行
+        best_params_map = {}
+        
+        if should_use_cache:
+            if rank == 0:
+                print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
+                best_params_map = param_cache[p_name]
+                # 简单打印一下参数
+                sample_key = list(best_params_map.keys())[0]
+                print(f"     👉 {sample_key}: {best_params_map[sample_key]}")
+            # Rank 1 不需要 best_params_map，因为它会跳过推理
+        else:
+            # 没有缓存，正常执行并行搜索
+            best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
+            
+            # Rank 0 保存新参数到缓存
+            if rank == 0:
+                param_cache[p_name] = best_params_map
+                try:
+                    with open(PARAMS_CACHE_FILE, 'w') as f:
+                        json.dump(param_cache, f, indent=2, default=str)
+                    print(f"   💾 [Cache] 参数已更新并保存")
+                except Exception as e:
+                    print(f"   ⚠️ [Cache] 保存失败: {e}")
+
+        # ⚠️ 同步屏障
         if world_size > 1:
             dist.barrier() 
 
-        # === 🛑 关键：只允许 Rank 0 进行后续的推理、绘图和保存 ===
+        # === 只允许 Rank 0 进行后续的推理、绘图和保存 ===
         if rank != 0:
-            continue # 其他显卡在此处完成当月任务，直接退出本次循环，等待下一月
+            continue 
         
-        # --- B. 样本外测试 ---
-        print(f"   Running Inference: {test_start} -> {test_end}")
+        # --- B. 样本外测试 (静默版) ---
+        print(f"   Run Inference: {test_start} -> {test_end}")
         
         for name, symbol in INDICES.items():
             my_params = best_params_map.get(name, best_params_map.get(list(best_params_map.keys())[0]))
@@ -351,20 +398,24 @@ def run_rolling_system():
             
             single_index_dict = {name: symbol}
             
-            # 运行推理 (不立刻覆盖 all_results，而是拿到这一轮的结果)
-            p_metrics, p_results = run_batch_inference(
-                predictor=predictor,
-                all_data=all_data,
-                indices_dict=single_index_dict,
-                config=idx_config,
-                output_dir=OUTPUT_DIR,
-                # 使用临时文件名，防止最终文件覆盖
-                model_name=f"temp_{p_name}_{name}", 
-                preprocess_fn=preprocess_window_finetuned,
-                denormalize_fn=denormalize,
-                # 注意：这里删除了 verbose=False 避免报错
-            )
+            # 🔵 使用 os.devnull 屏蔽 tqdm 的 stderr 输出
+            with open(os.devnull, 'w') as devnull:
+                with contextlib.redirect_stderr(devnull):
+                    # 运行推理
+                    p_metrics, p_results = run_batch_inference(
+                        predictor=predictor,
+                        all_data=all_data,
+                        indices_dict=single_index_dict,
+                        config=idx_config,
+                        output_dir=OUTPUT_DIR,
+                        model_name=f"temp_{p_name}_{name}", 
+                        preprocess_fn=preprocess_window_finetuned,
+                        denormalize_fn=denormalize,
+                    )
             
+            # 手动打印简单日志代替进度条
+            print(f"     📝 [Inference] {name} 完成 ({len(p_results[name])} days)", flush=True)
+
             # 1. 收集 Metrics
             for m in p_metrics:
                 m["period"] = p_name
@@ -372,60 +423,48 @@ def run_rolling_system():
                 m["best_LB"] = my_params["lookback"]
             all_metrics_buffer.extend(p_metrics)
             
-            # 2. 收集 Predictions (核心修正点)
-            # p_results 结构: {"上证50": DataFrame}
+            # 2. 收集 Predictions
             if name in p_results:
                 global_pred_buffers[name].append(p_results[name])
 
-    # 4. 汇总、拼接与保存
+    # 4. 汇总、拼接与保存 (Rank 0 only)
     if rank == 0:
         print("\n[4/4] 汇总数据与绘图...")
         
-        # === 🔴 核心修改 2: 拼接所有月份的预测结果 ===
+        # === 拼接所有月份的预测结果 ===
         final_full_predictions = {}
         
         for name, df_list in global_pred_buffers.items():
             if df_list:
-                # 纵向拼接该指数所有月份的预测
                 full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
                 final_full_predictions[name] = full_df
                 
-                # 保存该指数的完整 CSV
                 save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
                 full_df.to_csv(save_path, index=False)
                 print(f"   💾 已保存完整预测: {save_path} (Rows: {len(full_df)})")
             else:
                 print(f"   ⚠️ 未收集到指数 {name} 的预测数据")
 
-        # === 🔴 核心修改 3 (修复版): 分离明细保存与汇总展示 ===
-        
+        # === 分离明细保存与汇总展示 ===
         if all_metrics_buffer:
-            print(f"   📊 正在合并 {len(all_metrics_buffer)} 个分片 Metrics...")
+            print(f"   📊 正在合并 {len(all_metrics_buffer)} 个分片 Metrics...")
             
-            # 🛑 修复：使用 pd.concat 代替 pd.DataFrame
-            # all_metrics_buffer 是一个 DataFrame 的列表，需要纵向拼接
             df_metrics = pd.concat(all_metrics_buffer, ignore_index=True)
             
-            # 保存明细
             detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
             df_metrics.to_csv(detail_save_path, index=False)
-            print(f"   💾 已保存分月明细指标: {detail_save_path}")
+            print(f"   💾 已保存分月明细指标: {detail_save_path}")
 
-            # 计算平均并保存
-            # numeric_only=True 防止非数值列报错
             df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
             avg_metrics_list = df_avg.to_dict('records')
-            
-            # 调用你的工具函数
+
             aggregate_and_save_metrics(avg_metrics_list, OUTPUT_DIR, "rolling_all_avg")
         else:
-            print("   ⚠️ Metrics Buffer 为空，跳过汇总")
+            print("   ⚠️ Metrics Buffer 为空，跳过汇总")
         
-        # === 🔴 核心修改 4: 传入完整的 DataFrames 进行绘图 ===
-        # 现在 final_full_predictions 里的每个 DF 都是 1月-9月的完整数据
-        # plot_all_results 内部会根据这些数据画出完整的连贯曲线
         plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_plots=True)
         
+        # 保存搜参历史详情
         optimizer.save_history(OUTPUT_DIR)
         optimizer.plot_evolution(OUTPUT_DIR)
         
