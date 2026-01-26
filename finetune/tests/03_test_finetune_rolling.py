@@ -331,7 +331,7 @@ def run_rolling_system():
 
         # === 🛑 关键：只允许 Rank 0 进行后续的推理、绘图和保存 ===
         if rank != 0:
-            return # 其他显卡在此处完成当月任务，直接退出本次循环，等待下一月
+            continue # 其他显卡在此处完成当月任务，直接退出本次循环，等待下一月
         
         # --- B. 样本外测试 ---
         print(f"   Running Inference: {test_start} -> {test_end}")
