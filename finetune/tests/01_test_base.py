@@ -33,7 +33,7 @@ CONFIG = {
     "device": "cuda:0"
 }
 
-OUTPUT_DIR = "/gemini/code/outputs/base_test"
+OUTPUT_DIR = "/gemini/data-1/outputs/tests/base_test"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ================= Main Logic =================

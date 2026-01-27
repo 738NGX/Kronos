@@ -5,16 +5,13 @@ import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 from itertools import product
-from typing import Dict, List, Optional
-from tqdm import tqdm
+from typing import Dict
 from scipy.stats import spearmanr
 import warnings
 import contextlib
 
-# 过滤警告
 warnings.filterwarnings('ignore')
 
-# 引入项目依赖
 from testutils.test_utils import (
     setup_environment,
     run_batch_inference,
@@ -24,7 +21,6 @@ from testutils.test_utils import (
 from testutils.common_config import INDICES
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
 
-# 初始化环境
 setup_environment()
 
 from model import Kronos, KronosTokenizer, KronosPredictor
@@ -32,13 +28,11 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 import torch.distributed as dist
 
 def init_distributed_mode():
-    """初始化分布式环境，如果不是通过 torchrun 启动，则默认单卡运行"""
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
-        
-        # 核心：将当前进程绑定到指定的 GPU，防止张量乱跑
+
         torch.cuda.set_device(local_rank)
         dist.init_process_group(backend="nccl", init_method="env://")
         
@@ -48,7 +42,6 @@ def init_distributed_mode():
         print("⚠️ [Single] 单卡模式运行")
         return 0, 0, 1
 
-# 在 setup_environment() 之后立即调用
 rank, local_rank, world_size = init_distributed_mode()
 
 # ================= 配置区域 =================
@@ -78,7 +71,7 @@ PARAM_SEARCH_SPACE = {
     "lookback": [30, 60, 90]
 }
 
-OUTPUT_DIR = "/gemini/data-1/outputs/finetuned_rolling_final"
+OUTPUT_DIR = "/gemini/data-1/outputs/tests/finetuned_rolling_test"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ================= 核心优化类 (保持不变) =================
@@ -87,13 +80,10 @@ class ParameterOptimizer:
     def __init__(self, predictor, config: Dict):
         self.predictor = predictor
         self.config = config
-        self.rolling_params_history = []
-        self.optimization_details = []
     
     def grid_search(self, val_data: Dict[str, pd.DataFrame], param_space: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> Dict[str, Dict]:
-        # 仅主进程打印大的表头
         if rank == 0:
-            print(f"\n🔍 [独立参数优化] 区间: {val_start.date()} ~ {val_end.date()}")
+            print(f"\n🔍 [滚动搜参] 区间: {val_start.date()} ~ {val_end.date()}")
 
         min_data_len = min(len(df) for df in val_data.values())
         max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
@@ -128,19 +118,15 @@ class ParameterOptimizer:
                     local_best_ic[name] = score
                     local_best_params[name] = params.copy()
             
-            # --- 进度打印逻辑 ---
-            # 只有在特定的步数，或者完成最后一步时才打印
             if (i + 1) % log_interval == 0 or (i + 1) == total_tasks:
                 elapsed = time.time() - start_time
                 avg_time = elapsed / (i + 1)
                 remaining = avg_time * (total_tasks - (i + 1))
-                
-                # 打印格式：[GPU-0] 进度 5/24 (20%) | 耗时 12s | 剩余 40s
+
                 print(f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
                       f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)")
 
-        # === 🔥 结果汇总 ===
-        if rank == 0: print("   ⏳ 等待其他 GPU 完成任务...") # 提示用户进入等待阶段
+        if rank == 0: print("   ⏳ 等待其他 GPU 完成任务...")
         
         my_result = (local_best_params, local_best_ic)
         all_results_list = [None for _ in range(world_size)]
@@ -176,7 +162,6 @@ class ParameterOptimizer:
                     ic = final_best_ic[name]
                     print(f"     ✅ {name}: IC={ic:.4f} (T={p['T']}, LB={p['lookback']})")
             
-            self.rolling_params_history.append(final_best_params)
             return final_best_params
         
         return {}
@@ -194,12 +179,10 @@ class ParameterOptimizer:
             
             total_days = len(valid_indices)
             
-            if total_days <= 40:
-                # 验证集很短时，为了 IC 准确，每一天都测
+            if total_days <= 30:
                 step = 1
             else:
-                # 验证集很长时，为了速度，限制最大样本数约为 20
-                target_samples = 20
+                target_samples = 30
                 step = max(1, total_days // target_samples)
             
             sampled_indices = valid_indices[::step]
@@ -233,27 +216,6 @@ class ParameterOptimizer:
                     results[name] = -1.0 if np.isnan(corr) else corr
                 except: results[name] = -1.0
         return results
-
-    def save_history(self, output_dir: str):
-        path = os.path.join(output_dir, "rolling_params_history.json")
-        with open(path, 'w') as f: json.dump(self.optimization_details, f, indent=2, default=str)
-    
-    def plot_evolution(self, output_dir: str):
-        if not self.rolling_params_history: return
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-        history = self.rolling_params_history
-        x = range(len(history))
-        # 简单取第一个指数的参数做示意图
-        first_idx = list(history[0].keys())[0]
-        axes[0].plot(x, [p[first_idx]['T'] for p in history], 'o-', color='steelblue')
-        axes[0].set_title(f'Temperature ({first_idx})')
-        axes[1].plot(x, [p[first_idx]['top_p'] for p in history], 's-', color='orange')
-        axes[1].set_title('Top-p')
-        axes[2].plot(x, [p[first_idx]['lookback'] for p in history], '^-', color='green')
-        axes[2].set_title('Lookback Window')
-        plt.tight_layout()
-        plt.savefig(os.path.join(output_dir, "params_evolution.png"))
-        plt.close()
 
 # ================= 主流程 =================
 
@@ -359,10 +321,6 @@ def run_rolling_system():
             if rank == 0:
                 print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
                 best_params_map = param_cache[p_name]
-                # 简单打印一下参数
-                sample_key = list(best_params_map.keys())[0]
-                print(f"     👉 {sample_key}: {best_params_map[sample_key]}")
-            # Rank 1 不需要 best_params_map，因为它会跳过推理
         else:
             # 没有缓存，正常执行并行搜索
             best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
@@ -467,10 +425,19 @@ def run_rolling_system():
         
         print(f"\n🎨 正在为 {len(final_full_predictions)} 个指数生成图表...")
         plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_subplots=True)
-        
-        # 保存搜参历史详情
-        optimizer.save_history(OUTPUT_DIR)
-        optimizer.plot_evolution(OUTPUT_DIR)
+
+        # 清理批次推理生成的临时预测文件
+        temp_removed = 0
+        for fname in os.listdir(OUTPUT_DIR):
+            if fname.startswith("predictions_temp_") and fname.endswith(".csv"):
+                temp_path = os.path.join(OUTPUT_DIR, fname)
+                try:
+                    os.remove(temp_path)
+                    temp_removed += 1
+                except Exception as e:
+                    print(f"   ⚠️ 临时文件删除失败: {temp_path} ({e})")
+        if temp_removed:
+            print(f"   🧹 已清理 {temp_removed} 个临时预测文件")
         
         print(f"\n✅ 全部完成! 输出目录: {OUTPUT_DIR}")
 

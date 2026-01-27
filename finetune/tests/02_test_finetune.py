@@ -40,7 +40,7 @@ CONFIG = {
     "clip_val": 3.0           # 归一化截断值，与训练保持一致
 }
 
-OUTPUT_DIR = "/gemini/code/outputs/finetuned_test"
+OUTPUT_DIR = "/gemini/data-1/outputs/tests/finetuned_test"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ================= Main Logic =================
