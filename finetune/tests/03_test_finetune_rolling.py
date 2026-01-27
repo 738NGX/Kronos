@@ -145,7 +145,10 @@ class ParameterOptimizer:
             
             sampled_indices = valid_indices[::step]
 
+            # 🔥 修改 1: 增加价格列表容器
             idx_preds, idx_actuals = [], []
+            idx_pred_prices, idx_act_prices = [], [] 
+
             for idx in sampled_indices:
                 if idx < lookback: continue
                 real_input_len = lookback - 1
@@ -161,17 +164,49 @@ class ParameterOptimizer:
                             sample_count=1, verbose=False
                         )
                     curr = input_df.iloc[-1]["close"]
-                    pred = (pred_df.iloc[-1]["close"] - curr) / curr
-                    act = (df.iloc[idx + pred_len]["close"] - curr) / curr
-                    idx_preds.append(pred)
-                    idx_actuals.append(act)
+                    
+                    # 预测值
+                    pred_price = pred_df.iloc[-1]["close"]
+                    real_price = df.iloc[idx + pred_len]["close"]
+                    
+                    pred_ret = (pred_price - curr) / curr
+                    act_ret = (real_price - curr) / curr
+                    
+                    idx_preds.append(pred_ret)
+                    idx_actuals.append(act_ret)
+                    
+                    # 🔥 修改 2: 收集绝对价格
+                    idx_pred_prices.append(pred_price)
+                    idx_act_prices.append(real_price)
+
                 except Exception: continue
 
             if len(idx_preds) < 2: results[name] = -1.0
             else:
                 try:
-                    corr, _ = spearmanr(idx_actuals, idx_preds)
-                    results[name] = -1.0 if np.isnan(corr) else corr
+                    # 1. 计算收益率相关性 (IC)
+                    ret_corr, _ = spearmanr(idx_actuals, idx_preds)
+                    if np.isnan(ret_corr): ret_corr = -1.0
+                    
+                    # 🔥 修改 3: 计算价格相关性 (Price Corr)
+                    # 使用 Pearson 计算价格趋势的相关性
+                    price_corr = np.corrcoef(idx_act_prices, idx_pred_prices)[0, 1]
+                    if np.isnan(price_corr): price_corr = 0.0
+                    
+                    # 🔥 修改 4: 定义复合得分 (Composite Score)
+                    # 逻辑：既要 IC 高，也要 Price Corr 高
+                    # 权重分配：Price Corr 通常很高(0.9+)，IC 通常较低(0.1+)。
+                    # 简单相加即可，或者给 Price Corr 一个惩罚阈值。
+                    
+                    # 方案 A (推荐): 简单加权，兼顾两者
+                    # final_score = ret_corr + price_corr 
+                    
+                    # 方案 B (更严格): 如果 Price Corr 太低，直接判死刑
+                    if price_corr < 0.8: final_score = -1.0
+                    else: final_score = ret_corr
+
+                    results[name] = final_score
+                    
                 except: results[name] = -1.0
         return results
 
