@@ -4,6 +4,7 @@ Visualization utilities for Kronos model predictions
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 
 
 def plot_predictions(all_results, output_dir, model_name="base", test_config=None, combine_subplots=True):
@@ -37,7 +38,8 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
         
         for idx, (name, df) in enumerate(all_results.items()):
             ax = axes[idx]
-            plot_dates = df["date"] + pd.Timedelta(days=1)
+            # 将date转换为datetime类型并用作横坐标（预测值对应次日）
+            plot_dates = pd.to_datetime(df["date"]) + pd.Timedelta(days=1)
             
             ax.plot(plot_dates, df["real_t+1"], label="Ground Truth", 
                    color="gray", alpha=0.7, linewidth=1.5)
@@ -49,6 +51,10 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
             ax.set_ylabel("Price", fontsize=10)
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3)
+            
+            # 设置日期格式化器，确保标签与数据对齐
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
             ax.tick_params(axis='x', rotation=45)
         
         # 隐藏多余的子图
@@ -68,7 +74,8 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
         # 独立模式：每个指数单独保存
         for name, df in all_results.items():
             plt.figure(figsize=(12, 6))
-            plot_dates = df["date"] + pd.Timedelta(days=1)
+            # 将date转换为datetime类型并用作横坐标（预测值对应次日）
+            plot_dates = pd.to_datetime(df["date"]) + pd.Timedelta(days=1)
             
             plt.plot(plot_dates, df["real_t+1"], label="Ground Truth", 
                     color="gray", alpha=0.7, linewidth=1.5)
@@ -81,6 +88,11 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
             plt.ylabel("Price", fontsize=12)
             plt.legend(fontsize=11)
             plt.grid(True, alpha=0.3)
+            
+            # 设置日期格式化器，确保标签与数据对齐
+            ax = plt.gca()
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
             plt.xticks(rotation=45)
             plt.tight_layout()
             

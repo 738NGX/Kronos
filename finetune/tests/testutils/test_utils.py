@@ -132,183 +132,6 @@ def parse_test_args(description):
     return parser.parse_args()
 
 
-def run_batch_inference(
-    predictor, 
-    all_data, 
-    indices_dict, 
-    config, 
-    output_dir,
-    model_name,
-    preprocess_fn=None,
-    denormalize_fn=None
-):
-    """
-    批量推理优化版本 - 支持并行预测多个指数
-    
-    Args:
-        predictor: KronosPredictor instance
-        all_data: 所有指数的原始数据
-        indices_dict: 指数名称->代码 的字典
-        config: 配置字典，包含 lookback, pred_len, test_start, test_end, T, top_p, sample_count 等
-        output_dir: 输出目录
-        model_name: 模型名称 (base/finetuned)
-        preprocess_fn: 预处理函数（仅 finetuned 需要）
-        denormalize_fn: 反归一化函数（仅 finetuned 需要）
-    
-    Returns:
-        tuple: (all_metrics, all_results)
-    """
-    from testutils.data_utils import load_and_prepare_index_data
-    from testutils.metrics_utils import calculate_metrics
-    
-    # 1. 为所有指数加载并预处理数据
-    print("📥 加载所有指数数据...")
-    indices_data = {}
-    test_indices_dict = {}
-    
-    for name, symbol in indices_dict.items():
-        df, test_indices = load_and_prepare_index_data(all_data, name, symbol, config)
-        if df is not None:
-            indices_data[name] = df
-            test_indices_dict[name] = test_indices
-        else:
-            print(f"⚠️ Skipping {name}: 数据加载失败")
-    
-    if not indices_data:
-        print("❌ No valid index data found!")
-        return [], {}
-    
-    # 2. 获取所有有效指数的测试索引
-    # 需要找到所有指数都有数据的索引子集（用于批量预测）
-    all_indices_set = [set(test_indices_dict[name]) for name in indices_data.keys()]
-    common_indices = sorted(list(set.intersection(*all_indices_set)))
-    
-    if not common_indices:
-        print("❌ No common test indices across all valid indices!")
-        return [], {}
-    
-    print(f"🔄 批量推理：{len(indices_data)} 个指数 × {len(common_indices)} 天")
-    
-    all_metrics = []
-    all_results = {}
-    
-    # 3. 逐天进行批量预测
-    for idx in tqdm(common_indices):
-        # 检查 lookback 是否充足
-        if idx < config['lookback']:
-            continue
-        
-        # 收集当前索引的所有指数数据
-        batch_inputs = []
-        batch_x_timestamps = []
-        batch_y_timestamps = []
-        batch_names = []
-        batch_current_closes = []
-        batch_current_dates = []
-        batch_means = []
-        batch_stds = []
-        batch_dfs = []
-        
-        for name in indices_data.keys():
-            df = indices_data[name]
-            
-            # 准备输入数据
-            input_df = df.iloc[idx - config['lookback'] + 1 : idx + 1].copy()
-            current_date = df.iloc[idx]["date"]
-            current_close = df.iloc[idx]["close"]
-            
-            # 预处理（如果提供了预处理函数）
-            if preprocess_fn is not None:
-                x_norm, x_stamp, x_mean, x_std = preprocess_fn(input_df, config)
-                norm_input_df = pd.DataFrame(x_norm, columns=config.get("feature_cols", ["open", "high", "low", "close", "volume"]))
-                norm_input_df["date"] = input_df["date"].values
-                batch_inputs.append(norm_input_df)
-                batch_means.append(x_mean)
-                batch_stds.append(x_std)
-            else:
-                # Base model 的情况：直接使用原始数据（predictor 内部会处理归一化）
-                batch_inputs.append(input_df)
-                batch_means.append(None)
-                batch_stds.append(None)
-            
-            future_dates = pd.bdate_range(start=current_date + pd.Timedelta(days=1), periods=config['pred_len'])
-            
-            batch_x_timestamps.append(pd.Series(input_df["date"]))
-            batch_y_timestamps.append(pd.Series(future_dates))
-            batch_names.append(name)
-            batch_current_closes.append(current_close)
-            batch_current_dates.append(current_date)
-            batch_dfs.append(df)
-        
-        # 4. 批量预测
-        try:
-            pred_outs = predictor.predict_batch(
-                batch_inputs,
-                batch_x_timestamps,
-                batch_y_timestamps,
-                pred_len=config['pred_len'],
-                T=config['T'],
-                top_p=config['top_p'],
-                sample_count=config['sample_count'],
-                verbose=False
-            )
-            
-            # 5. 处理批量预测结果
-            for i, name in enumerate(batch_names):
-                pred_out = pred_outs[i]
-                current_date = batch_current_dates[i]
-                current_close = batch_current_closes[i]
-                df = batch_dfs[i]
-                
-                row = {
-                    "date": current_date,
-                    "current_close": current_close,
-                }
-                
-                for j in range(config['pred_len']):
-                    # 获取预测值
-                    if preprocess_fn is not None and denormalize_fn is not None:
-                        # Finetuned 模型：需要反归一化
-                        pred_z_score = pred_out.iloc[j]["close"]
-                        pred_price = denormalize_fn(pred_z_score, batch_means[i], batch_stds[i], target_col_idx=3)
-                    else:
-                        # Base 模型：直接使用
-                        pred_price = pred_out.iloc[j]["close"]
-                    
-                    row[f"pred_t+{j+1}"] = pred_price
-                    
-                    # Ground truth
-                    if idx + 1 + j < len(df):
-                        row[f"real_t+{j+1}"] = df.iloc[idx + 1 + j]["close"]
-                    else:
-                        row[f"real_t+{j+1}"] = np.nan
-                
-                # 存储预测结果
-                if name not in all_results:
-                    all_results[name] = []
-                all_results[name].append(row)
-                
-        except Exception as e:
-            print(f"⚠️ 批量预测在 idx={idx} 失败: {e}")
-            pass
-    
-    # 6. 处理结果
-    for name in all_results.keys():
-        res_df = pd.DataFrame(all_results[name])
-        # 保存
-        res_df.to_csv(os.path.join(output_dir, f"predictions_{model_name}_{name}.csv"), index=False)
-        
-        # 计算指标
-        idx_metrics = calculate_metrics(res_df)
-        idx_metrics["Index"] = name
-        all_metrics.append(idx_metrics)
-        
-        # 更新结果字典
-        all_results[name] = res_df
-    
-    return all_metrics, all_results
-
-
 def run_distributed_inference(
     predictor,
     all_data,
@@ -361,30 +184,44 @@ def run_distributed_inference(
             print("❌ No valid index data found!")
         return [], {}
 
-    all_indices_set = [set(test_indices_dict[name]) for name in indices_data.keys()]
-    common_indices = sorted(list(set.intersection(*all_indices_set)))
+    # 基于日期而非行索引进行匹配
+    test_dates_dict = {}
+    for name in indices_data.keys():
+        df = indices_data[name]
+        # 只包含满足 lookback 要求的日期
+        valid_dates = []
+        for idx in test_indices_dict[name]:
+            if idx >= config['lookback']:
+                valid_dates.append(df.loc[idx, "date"])
+        test_dates_dict[name] = set(valid_dates)
+    
+    all_dates_set = [test_dates_dict[name] for name in indices_data.keys()]
+    common_dates = sorted(list(set.intersection(*all_dates_set)))
 
-    if not common_indices:
+    if not common_dates:
         if rank == 0:
-            print("❌ No common test indices across all valid indices!")
+            print("❌ No common test dates across all valid indices!")
         return [], {}
 
-    my_indices = common_indices[rank::world_size]
+    # 为每个指数建立日期到行索引的映射
+    date_to_idx_map = {}
+    for name in indices_data.keys():
+        df = indices_data[name]
+        date_to_idx_map[name] = {date: idx for idx, date in zip(df.index, df["date"])}
+
+    my_dates = common_dates[rank::world_size]
 
     if rank == 0:
-        print(f"🔄 分布式推理: {len(indices_data)} 个指数 × {len(common_indices)} 天")
-        print(f"   ⚙️ 显卡数: {world_size} | 单卡任务: ~{len(my_indices)}")
+        print(f"🔄 分布式推理: {len(indices_data)} 个指数 × {len(common_dates)} 天")
+        print(f"   ⚙️ 显卡数: {world_size} | 单卡任务: ~{len(my_dates)}")
 
     local_results = {name: [] for name in indices_data.keys()}
 
     import time
     start_time = time.time()
-    log_interval = max(1, max(1, len(my_indices)) // 5)
+    log_interval = max(1, max(1, len(my_dates)) // 5)
 
-    for i, idx in enumerate(my_indices):
-        if idx < config['lookback']:
-            continue
-
+    for i, current_date in enumerate(my_dates):
         batch_inputs = []
         batch_x_timestamps = []
         batch_y_timestamps = []
@@ -397,8 +234,11 @@ def run_distributed_inference(
 
         for name in indices_data.keys():
             df = indices_data[name]
+            idx = date_to_idx_map[name].get(current_date)
+            if idx is None or idx < config['lookback']:
+                continue
+            
             input_df = df.iloc[idx - config['lookback'] + 1 : idx + 1].copy()
-            current_date = df.iloc[idx]["date"]
             current_close = df.iloc[idx]["close"]
 
             future_dates = pd.bdate_range(start=current_date + pd.Timedelta(days=1), periods=config['pred_len'])
@@ -421,6 +261,10 @@ def run_distributed_inference(
             batch_current_closes.append(current_close)
             batch_current_dates.append(current_date)
             batch_dfs.append(df)
+        
+        # 如果当前日期没有满足条件的指数，跳过
+        if not batch_names:
+            continue
 
         try:
             with torch.no_grad():
@@ -464,14 +308,14 @@ def run_distributed_inference(
 
         except Exception as e:
             if rank == 0:
-                print(f"⚠️ 预测失败 idx={idx}: {e}")
+                print(f"⚠️ 预测失败 date={current_date}: {e}")
 
-        if (i + 1) % log_interval == 0 or (i + 1) == len(my_indices):
+        if (i + 1) % log_interval == 0 or (i + 1) == len(my_dates):
             elapsed = time.time() - start_time
             avg_time = elapsed / (i + 1)
-            remaining = avg_time * max(0, len(my_indices) - (i + 1))
+            remaining = avg_time * max(0, len(my_dates) - (i + 1))
             print(
-                f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{max(1,len(my_indices))} ({((i+1)/max(1,len(my_indices)))*100:.0f}%) | "
+                f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{max(1,len(my_dates))} ({((i+1)/max(1,len(my_dates)))*100:.0f}%) | "
                 f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)"
             )
 
