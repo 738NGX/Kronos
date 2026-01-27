@@ -59,10 +59,8 @@ def load_and_prepare_index_data(all_data, name, symbol, config):
             "成交金额(万元)": "amount"
         })
         
-        df['volume'] = df['volume'] * 10000  # 转换为股
-        
-        if "amount" not in df.columns:
-            df["amount"] = df["close"] * df["volume"]
+        df['volume'] = df['volume'] * 10000
+        df['amount'] = df['amount'] * 10000
         
         df["date"] = pd.to_datetime(df["date"])
         df = df.sort_values("date").reset_index(drop=True)
