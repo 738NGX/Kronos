@@ -1,6 +1,4 @@
 import os
-
-# Import shared utilities
 from testutils.test_utils import (
     setup_environment,
     run_batch_inference,
@@ -8,39 +6,15 @@ from testutils.test_utils import (
     plot_all_results,
     parse_test_args
 )
-from testutils.common_config import INDICES
+from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
-
-# Setup environment (fonts, paths, etc.)
-setup_environment()
-
 from model import Kronos, KronosTokenizer, KronosPredictor
 
-# ================= Configuration =================
-CONFIG = {
-    # 路径配置：直接指向 safetensors
-    "model_path": "/gemini/data-1/outputs/csi1000_models/finetune_predictor/checkpoints/best_model", # 假设该目录下有 model.safetensors
-    "tokenizer_path": "/gemini/data-1/outputs/csi1000_models/finetune_tokenizer/checkpoints/best_model", 
-    
-    # 推理参数
-    "lookback": 250,
-    "pred_len": 5,
-    "T": 0.6,
-    "top_p": 0.9,
-    "sample_count": 10,
-    
-    # 测试范围
-    "test_start": "2025-01-01",
-    "test_end": "2025-09-30",
-    "device": "cuda:0",
-    
-    # 特征列定义 (必须与微调训练时一致)
-    "feature_cols": ["open", "high", "low", "close", "volume"],
-    "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 5.0
-}
+setup_environment()
 
-OUTPUT_DIR = "/gemini/data-1/outputs/tests/finetuned_test"
+CONFIG = FINETUNE_CONFIG | { "device": "cuda:0" }
+
+OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, "finetuned_test")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ================= Main Logic =================

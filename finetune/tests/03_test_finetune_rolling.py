@@ -3,29 +3,22 @@ import json
 import numpy as np
 import pandas as pd
 import torch
-import matplotlib.pyplot as plt
 from itertools import product
 from typing import Dict
 from scipy.stats import spearmanr
-import warnings
 import contextlib
-
-warnings.filterwarnings('ignore')
-
 from testutils.test_utils import (
     setup_environment,
     run_batch_inference,
     aggregate_and_save_metrics,
     plot_all_results,
 )
-from testutils.common_config import INDICES
+from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
+from model import Kronos, KronosTokenizer, KronosPredictor
+import torch.distributed as dist
 
 setup_environment()
-
-from model import Kronos, KronosTokenizer, KronosPredictor
-
-import torch.distributed as dist
 
 def init_distributed_mode():
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
@@ -44,37 +37,17 @@ def init_distributed_mode():
 
 rank, local_rank, world_size = init_distributed_mode()
 
-# ================= 配置区域 =================
-
-CONFIG = {
-    "model_path": "/gemini/data-1/outputs/csi1000_models/finetune_predictor/checkpoints/best_model",
-    "tokenizer_path": "/gemini/data-1/outputs/csi1000_models/finetune_tokenizer/checkpoints/best_model", 
-    "lookback": 250,
-    "pred_len": 5,
-    "T": 0.6,
-    "top_p": 0.9,
-    "sample_count": 10,
-    "test_start": "2025-01-01",
-    "test_end": "2025-09-30",
-    "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu",
-    "feature_cols": ["open", "high", "low", "close", "volume"],
-    "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 5.0
-}
+CONFIG = FINETUNE_CONFIG | { "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu" }
 
 PARAMS_CACHE_FILE = "/gemini/data-1/rolling_params_cache.json"
-
-# 参数搜索空间
 PARAM_SEARCH_SPACE = {
     "T": [0.3, 0.6, 0.8, 1.0],
     "top_p": [0.2, 0.4, 0.6, 0.9],
     "lookback": [30, 60, 90]
 }
 
-OUTPUT_DIR = "/gemini/data-1/outputs/tests/finetuned_rolling_test"
+OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, "finetuned_rolling_test")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-# ================= 核心优化类 (保持不变) =================
 
 class ParameterOptimizer:
     def __init__(self, predictor, config: Dict):
@@ -216,8 +189,6 @@ class ParameterOptimizer:
                     results[name] = -1.0 if np.isnan(corr) else corr
                 except: results[name] = -1.0
         return results
-
-# ================= 主流程 =================
 
 def run_rolling_system():
     print("="*60)

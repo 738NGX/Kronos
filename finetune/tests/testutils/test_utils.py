@@ -10,6 +10,7 @@ import torch
 import matplotlib.pyplot as plt
 import argparse
 from tqdm import tqdm
+import warnings
 
 def setup_environment(seed: int = 100):
     """
@@ -35,7 +36,9 @@ def setup_environment(seed: int = 100):
     
     # 确保模型路径可访问
     sys.path.append("/gemini/code/")
-
+    
+    # 忽略警告
+    warnings.filterwarnings('ignore')
 
 def save_prediction_results(predictions, output_dir, model_name, index_name):
     """
