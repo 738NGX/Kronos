@@ -17,6 +17,7 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 rank, local_rank, world_size = init_distributed_mode()
 
 CONFIG = BASE_CONFIG | { 
+    "lookback": 400,
     "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu"
 }
 
