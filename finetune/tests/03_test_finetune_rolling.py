@@ -59,7 +59,7 @@ CONFIG = {
     "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu",
     "feature_cols": ["open", "high", "low", "close", "volume"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 3.0
+    "clip_val": 5.0
 }
 
 PARAMS_CACHE_FILE = "/gemini/data-1/rolling_params_cache.json"

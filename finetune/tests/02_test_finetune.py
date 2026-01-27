@@ -23,8 +23,8 @@ CONFIG = {
     "tokenizer_path": "/gemini/data-1/outputs/csi1000_models/finetune_tokenizer/checkpoints/best_model", 
     
     # 推理参数
-    "lookback": 250,          # 必须与微调时的 context length 一致
-    "pred_len": 5,            # 预测步长
+    "lookback": 250,
+    "pred_len": 5,
     "T": 0.6,
     "top_p": 0.9,
     "sample_count": 10,
@@ -37,7 +37,7 @@ CONFIG = {
     # 特征列定义 (必须与微调训练时一致)
     "feature_cols": ["open", "high", "low", "close", "volume"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 3.0           # 归一化截断值，与训练保持一致
+    "clip_val": 5.0
 }
 
 OUTPUT_DIR = "/gemini/data-1/outputs/tests/finetuned_test"
@@ -57,11 +57,7 @@ def run_inference(combine_plots=True):
     
     # 1. 加载微调后的模型 (Safetensors)
     print(f"🚀 Loading Finetuned Kronos from {CONFIG['model_path']}...")
-    
-    # 显式使用 safetensors 加载
     tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
-    # 注意：HuggingFace Transformer 库通常会自动识别 safetensors，
-    # 但如果通过 use_safetensors=True 强制指定会更稳妥
     model = Kronos.from_pretrained(CONFIG['model_path'])
     
     # 初始化预测器
