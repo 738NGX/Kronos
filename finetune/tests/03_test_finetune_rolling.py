@@ -6,12 +6,12 @@ import torch
 from itertools import product
 from typing import Dict
 from scipy.stats import spearmanr
-import contextlib
 from testutils.test_utils import (
     setup_environment,
-    run_batch_inference,
     aggregate_and_save_metrics,
     plot_all_results,
+    init_distributed_mode,
+    run_distributed_inference,
 )
 from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
@@ -19,21 +19,6 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 import torch.distributed as dist
 
 setup_environment()
-
-def init_distributed_mode():
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", init_method="env://")
-        
-        print(f"🔥 [DDP] 进程启动: Global Rank {rank} | Local Rank {local_rank} | Total {world_size}")
-        return rank, local_rank, world_size
-    else:
-        print("⚠️ [Single] 单卡模式运行")
-        return 0, 0, 1
 
 rank, local_rank, world_size = init_distributed_mode()
 
@@ -250,11 +235,9 @@ def run_rolling_system():
         if rank == 0:
             print(f"\n📅 周期: {p_name}")
         
-        # 准备验证数据
         val_start_dt = pd.to_datetime(val_start)
         val_end_dt = pd.to_datetime(val_end)
         
-        # 提取验证集切片
         val_data_slice = {}
         max_lb = max(PARAM_SEARCH_SPACE['lookback'])
         history_buffer = pd.Timedelta(days=max_lb * 2) 
@@ -270,33 +253,23 @@ def run_rolling_system():
                 val_data_slice[name] = slice_df
 
         # --- A. 参数搜索 (带缓存检查) ---
-        
-        # 1. 决策：Rank 0 检查是否有缓存
         use_cache = False
-        if rank == 0:
-            if p_name in param_cache:
-                use_cache = True
-        
-        # 2. 同步：Rank 0 将决策告诉 Rank 1 (防止 Rank 1 进入 GridSearch 等待)
-        # 广播张量：1=Use Cache, 0=Search
+        if rank == 0 and p_name in param_cache:
+            use_cache = True
+
         decision_tensor = torch.tensor([1 if use_cache else 0], dtype=torch.int, device=CONFIG['device'])
         if world_size > 1:
             dist.broadcast(decision_tensor, src=0)
-        
         should_use_cache = (decision_tensor.item() == 1)
 
-        # 3. 执行
         best_params_map = {}
-        
+
         if should_use_cache:
             if rank == 0:
                 print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
                 best_params_map = param_cache[p_name]
         else:
-            # 没有缓存，正常执行并行搜索
             best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
-            
-            # Rank 0 保存新参数到缓存
             if rank == 0:
                 param_cache[p_name] = best_params_map
                 try:
@@ -306,55 +279,55 @@ def run_rolling_system():
                 except Exception as e:
                     print(f"   ⚠️ [Cache] 保存失败: {e}")
 
-        # ⚠️ 同步屏障
+        # 确保所有卡完成搜参
         if world_size > 1:
-            dist.barrier() 
+            dist.barrier()
 
-        # === 只允许 Rank 0 进行后续的推理、绘图和保存 ===
-        if rank != 0:
-            continue 
-        
-        # --- B. 样本外测试 (静默版) ---
-        print(f"   Run Inference: {test_start} -> {test_end}")
-        
+        # 将最佳参数广播给所有卡，便于后续多卡推理
+        if world_size > 1:
+            obj_list = [best_params_map]
+            dist.broadcast_object_list(obj_list, src=0)
+            best_params_map = obj_list[0]
+
+        # --- B. 样本外测试（多卡推理，搜参结束后统一进入） ---
         for name, symbol in INDICES.items():
-            my_params = best_params_map.get(name, best_params_map.get(list(best_params_map.keys())[0]))
-            
+            my_params = best_params_map.get(name, best_params_map.get(next(iter(best_params_map)) if best_params_map else name, {}))
+            if not my_params:
+                if rank == 0:
+                    print(f"   ⚠️ {name} 无可用参数，跳过")
+                continue
+
             idx_config = CONFIG.copy()
             idx_config.update(my_params)
             idx_config["test_start"] = test_start
             idx_config["test_end"] = test_end
-            
-            single_index_dict = {name: symbol}
-            
-            # 🔵 使用 os.devnull 屏蔽 tqdm 的 stderr 输出
-            with open(os.devnull, 'w') as devnull:
-                with contextlib.redirect_stderr(devnull):
-                    # 运行推理
-                    p_metrics, p_results = run_batch_inference(
-                        predictor=predictor,
-                        all_data=all_data,
-                        indices_dict=single_index_dict,
-                        config=idx_config,
-                        output_dir=OUTPUT_DIR,
-                        model_name=f"temp_{p_name}_{name}", 
-                        preprocess_fn=preprocess_window_finetuned,
-                        denormalize_fn=denormalize,
-                    )
-            
-            # 手动打印简单日志代替进度条
-            print(f"     📝 [Inference] {name} 完成 ({len(p_results[name])} days)", flush=True)
 
-            # 1. 收集 Metrics
-            for m in p_metrics:
-                m["period"] = p_name
-                m["best_T"] = my_params["T"]
-                m["best_LB"] = my_params["lookback"]
-            all_metrics_buffer.extend(p_metrics)
-            
-            # 2. 收集 Predictions
-            if name in p_results:
-                global_pred_buffers[name].append(p_results[name])
+            single_index_dict = {name: symbol}
+
+            p_metrics, p_results = run_distributed_inference(
+                predictor=predictor,
+                all_data=all_data,
+                indices_dict=single_index_dict,
+                config=idx_config,
+                output_dir=OUTPUT_DIR,
+                model_name=f"temp_{p_name}_{name}",
+                rank=rank,
+                world_size=world_size,
+                preprocess_fn=preprocess_window_finetuned,
+                denormalize_fn=denormalize,
+            )
+
+            if rank == 0:
+                print(f"     📝 [Inference] {name} 完成 ({len(p_results.get(name, [])) if p_results else 0} days)", flush=True)
+
+                for m in p_metrics:
+                    m["period"] = p_name
+                    m["best_T"] = my_params["T"]
+                    m["best_LB"] = my_params["lookback"]
+                all_metrics_buffer.extend(p_metrics)
+
+                if name in p_results:
+                    global_pred_buffers[name].append(p_results[name])
 
     # 4. 汇总、拼接与保存 (Rank 0 only)
     if rank == 0:
