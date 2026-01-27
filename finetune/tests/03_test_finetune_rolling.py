@@ -15,10 +15,10 @@ from testutils.test_utils import (
 )
 from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
 from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
-from model import Kronos, KronosTokenizer, KronosPredictor
 import torch.distributed as dist
 
 setup_environment()
+from model import Kronos, KronosTokenizer, KronosPredictor
 
 rank, local_rank, world_size = init_distributed_mode()
 
