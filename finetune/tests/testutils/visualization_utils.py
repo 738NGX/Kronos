@@ -52,9 +52,44 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
             ax.legend(fontsize=9)
             ax.grid(True, alpha=0.3)
             
-            # 设置日期格式化器，确保标签与数据对齐
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+            # 明确设置横坐标范围，避免自动扩展
+            if len(plot_dates) > 0:
+                ax.set_xlim(plot_dates.min(), plot_dates.max())
+                
+                # 设置日期格式化器 - 显示具体日期
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y/%m/%d'))
+                
+                # 根据起始日期生成刻度：每月的相应日期
+                min_date = plot_dates.min()
+                max_date = plot_dates.max()
+                
+                # 获取起始日期的日份
+                start_day = min_date.day
+                
+                # 生成从起始日期开始，每月同一日期的刻度列表
+                tick_dates = []
+                current = min_date.replace(day=start_day)
+                while current <= max_date:
+                    if current >= min_date and current <= max_date:
+                        tick_dates.append(current)
+                    # 移到下一个月
+                    try:
+                        current = current.replace(month=current.month + 1)
+                    except ValueError:
+                        # 处理月份溢出（比如1月31日跳到2月）
+                        if current.month == 12:
+                            current = current.replace(year=current.year + 1, month=1)
+                        else:
+                            current = current.replace(month=current.month + 1)
+                        # 如果该月没有这一天，用该月最后一天
+                        if current.day < start_day:
+                            import calendar
+                            last_day = calendar.monthrange(current.year, current.month)[1]
+                            current = current.replace(day=min(start_day, last_day))
+                
+                if tick_dates:
+                    ax.set_xticks(tick_dates)
+            
             ax.tick_params(axis='x', rotation=45)
         
         # 隐藏多余的子图
@@ -89,10 +124,45 @@ def plot_predictions(all_results, output_dir, model_name="base", test_config=Non
             plt.legend(fontsize=11)
             plt.grid(True, alpha=0.3)
             
-            # 设置日期格式化器，确保标签与数据对齐
+            # 明确设置横坐标范围，避免自动扩展
             ax = plt.gca()
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
-            ax.xaxis.set_major_locator(mdates.MonthLocator(interval=1))
+            if len(plot_dates) > 0:
+                ax.set_xlim(plot_dates.min(), plot_dates.max())
+                
+                # 设置日期格式化器 - 显示具体日期
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y/%m/%d'))
+                
+                # 根据起始日期生成刻度：每月的相应日期
+                min_date = plot_dates.min()
+                max_date = plot_dates.max()
+                
+                # 获取起始日期的日份
+                start_day = min_date.day
+                
+                # 生成从起始日期开始，每月同一日期的刻度列表
+                tick_dates = []
+                current = min_date.replace(day=start_day)
+                while current <= max_date:
+                    if current >= min_date and current <= max_date:
+                        tick_dates.append(current)
+                    # 移到下一个月
+                    try:
+                        current = current.replace(month=current.month + 1)
+                    except ValueError:
+                        # 处理月份溢出（比如1月31日跳到2月）
+                        if current.month == 12:
+                            current = current.replace(year=current.year + 1, month=1)
+                        else:
+                            current = current.replace(month=current.month + 1)
+                        # 如果该月没有这一天，用该月最后一天
+                        if current.day < start_day:
+                            import calendar
+                            last_day = calendar.monthrange(current.year, current.month)[1]
+                            current = current.replace(day=min(start_day, last_day))
+                
+                if tick_dates:
+                    ax.set_xticks(tick_dates)
+            
             plt.xticks(rotation=45)
             plt.tight_layout()
             
