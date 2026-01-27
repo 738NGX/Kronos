@@ -195,19 +195,13 @@ class ParameterOptimizer:
                     
                     # 🔥 修改 4: 定义复合得分 (Composite Score)
                     # 逻辑：既要 IC 高，也要 Price Corr 高
-                    # 权重分配：Price Corr 通常很高(0.9+)，IC 通常较低(0.1+)。
-                    # 简单相加即可，或者给 Price Corr 一个惩罚阈值。
-                    
-                    # 方案 A (推荐): 简单加权，兼顾两者
-                    # final_score = ret_corr + price_corr 
-                    
-                    # 方案 B (更严格): 如果 Price Corr 太低，直接判死刑
-                    if price_corr < 0.8: final_score = -1.0
-                    else: final_score = ret_corr
+                    final_score = ret_corr + 0.5 * price_corr
 
                     results[name] = final_score
                     
-                except: results[name] = -1.0
+                except Exception: continue
+        if name not in results:
+            results[name] = -999.0
         return results
 
 def run_rolling_system():
