@@ -14,8 +14,8 @@ class QlibDataPreprocessor:
 
     def __init__(self):
         self.config = Config()
-        # 内部映射 Tushare 的 Data 轴索引（OCHL + Vol/Amt + Adj + Turnover + MV）
-        self.sec_map = {'open': 0, 'high': 1, 'low': 2, 'close': 3, 'vol': 7, 'amt': 8}
+        # 内部映射 Tushare 的 Data 轴索引（OCHL + volume/amount + Adj + Turnover + MV）
+        self.sec_map = {'open': 0, 'high': 1, 'low': 2, 'close': 3, 'volume': 7, 'amount': 8}
         self.bas_map = {'adj_factor': 1, 'turnover': 4, 'total_mv': 11}
         self.data = {}
 
@@ -94,8 +94,8 @@ class QlibDataPreprocessor:
                         'high': v_sec.values[:, idx_s, self.sec_map['high']] * adj,
                         'low': v_sec.values[:, idx_s, self.sec_map['low']] * adj,
                         'close': v_sec.values[:, idx_s, self.sec_map['close']] * adj,
-                        'vol': v_sec.values[:, idx_s, self.sec_map['vol']],
-                        'amt': v_sec.values[:, idx_s, self.sec_map['amt']],
+                        'volume': v_sec.values[:, idx_s, self.sec_map['volume']],
+                        'amount': v_sec.values[:, idx_s, self.sec_map['amount']],
                         'turnover': v_bas.values[:, idx_b, self.bas_map['turnover']],
                         'total_mv': v_bas.values[:, idx_b, self.bas_map['total_mv']]
                     }, index=f_dates)

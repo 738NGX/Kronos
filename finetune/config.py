@@ -24,7 +24,7 @@ class Config:
         self.max_context = 512  # Maximum context length for the model.
 
         # Features to be used from the raw data.
-        self.feature_list = ['open', 'high', 'low', 'close', 'vol', 'amt']
+        self.feature_list = ['open', 'high', 'low', 'close', 'volume', 'amount']
         # Time-based features to be generated.
         self.time_feature_list = ['minute', 'hour', 'weekday', 'day', 'month']
 

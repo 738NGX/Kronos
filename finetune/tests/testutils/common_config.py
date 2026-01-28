@@ -35,7 +35,7 @@ MODEL_CONFIG = {
     "model_path": "/gemini/data-1/outputs/csi1000_models/finetune_predictor/checkpoints/best_model",
     "tokenizer_path": "/gemini/data-1/outputs/csi1000_models/finetune_tokenizer/checkpoints/best_model", 
     # 特征定义
-    "feature_cols": ["open", "high", "low", "close", "volume"],
+    "feature_cols": ["open", "high", "low", "close", "volume", "amount"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
     "clip_val": 5.0,
 }

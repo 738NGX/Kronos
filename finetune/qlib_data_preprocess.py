@@ -123,8 +123,8 @@ class QlibDataPreprocessor:
             symbol_df = symbol_df.rename(columns={f'${field}': field for field in self.data_fields})
 
             # Calculate amount and select final features.
-            symbol_df['vol'] = symbol_df['volume']
-            symbol_df['amt'] = (symbol_df['open'] + symbol_df['high'] + symbol_df['low'] + symbol_df['close']) / 4 * symbol_df['vol']
+            symbol_df['volume'] = symbol_df['volume']  # Keep volume as-is
+            symbol_df['amount'] = (symbol_df['open'] + symbol_df['high'] + symbol_df['low'] + symbol_df['close']) / 4 * symbol_df['volume']
             symbol_df = symbol_df[self.config.feature_list]
 
             # Filter out symbols with insufficient data.
