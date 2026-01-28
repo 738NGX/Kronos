@@ -128,60 +128,49 @@ class ParameterOptimizer:
         lookback = params["lookback"]
         pred_len = self.config["pred_len"]
         results = {}
+
         for name, df in val_data.items():
+            # 获取验证集区间内的有效日期索引
             mask = (df["date"] >= val_start) & (df["date"] <= val_end - pd.Timedelta(days=pred_len))
             valid_indices = df[mask].index.tolist()
-            if not valid_indices:
-                results[name] = -1.0
-                continue
             
-            # 【关键修改】不再采样，使用验证集全部数据以获得更稳定的相关系数
-            sampled_indices = valid_indices
+            all_pred_rets = []
+            all_actual_rets = []
 
-            # 收集完整的5天预测序列和真实序列
-            all_pred_prices, all_actual_prices = [], []
-
-            for idx in sampled_indices:
-                if idx < lookback: continue
-                real_input_len = lookback - 1
-                input_df = df.iloc[idx - real_input_len + 1 : idx + 1]
-                if len(input_df) != real_input_len: continue
+            for idx in valid_indices:
+                # 确定输入序列与预测基准价格
+                input_df = df.iloc[idx - lookback + 1 : idx + 1]
+                current_price = df.iloc[idx]["close"]
                 
-                # 确保有足够的未来数据
-                if idx + pred_len >= len(df): continue
+                # y_timestamp 必须严格对应未来 pred_len 天的真实日期
+                future_dates = df.iloc[idx + 1 : idx + 1 + pred_len]["date"]
                 
-                try:
-                    with torch.no_grad():
-                        pred_df = self.predictor.predict(
-                            df=input_df, x_timestamp=input_df["date"],
-                            y_timestamp=df.iloc[idx + 1 : idx + 1 + pred_len]["date"],
-                            pred_len=pred_len, T=params["T"], top_p=params["top_p"],
-                            sample_count=1, verbose=False
-                        )
+                # 推理：产生预测路径
+                pred_df = self.predictor.predict(
+                    df=input_df, 
+                    x_timestamp=input_df["date"],
+                    y_timestamp=future_dates,
+                    pred_len=pred_len, 
+                    T=params["T"], 
+                    top_p=params["top_p"],
+                    sample_count=1, 
+                    verbose=False
+                )
+                
+                # 计算预测路径中每一天相对于当前价格的收益率 (P_future / P_current - 1)
+                # 这一步去除了价格绝对量纲，强制模型必须在“变动趋势”上与真实序列对齐
+                for day in range(pred_len):
+                    p_val = pred_df.iloc[day]["close"]
+                    r_val = df.iloc[idx + 1 + day]["close"]
                     
-                    # 收集未来5天的所有预测值和真实值（不只是第5天）
-                    for day in range(pred_len):
-                        if day < len(pred_df):
-                            pred_price = pred_df.iloc[day]["close"]
-                            real_price = df.iloc[idx + 1 + day]["close"]
-                            all_pred_prices.append(pred_price)
-                            all_actual_prices.append(real_price)
+                    all_pred_rets.append(p_val / current_price - 1)
+                    all_actual_rets.append(r_val / current_price - 1)
 
-                except Exception: continue
-
-            if len(all_pred_prices) < 2: results[name] = -1.0
-            else:
-                try:
-                    # 报告要求：计算"未来5日收盘价预测序列与真实序列间"的Spearman相关系数
-                    # 这里的"序列"指的是所有5天预测的集合
-                    price_corr, _ = spearmanr(all_actual_prices, all_pred_prices)
-                    if np.isnan(price_corr): price_corr = -999.0
-                    
-                    results[name] = price_corr
-                    
-                except Exception: continue
-        if name not in results:
-            results[name] = -999.0
+            # 基于收益率序列计算全局 Spearman 相关系数
+            # 只有在趋势（Rank）上高度一致，才能获得类似报告中的 0.8+ 高分
+            score, _ = spearmanr(all_actual_rets, all_pred_rets)
+            results[name] = score
+                
         return results
 
 def run_rolling_system():
