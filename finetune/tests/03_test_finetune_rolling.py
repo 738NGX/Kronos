@@ -145,7 +145,8 @@ class ParameterOptimizer:
             
             sampled_indices = valid_indices[::step]
 
-            idx_preds, idx_actuals = [], [] 
+            # 收集价格预测序列（报告中的关键指标）
+            idx_pred_prices, idx_actual_prices = [], []
 
             for idx in sampled_indices:
                 if idx < lookback: continue
@@ -161,28 +162,25 @@ class ParameterOptimizer:
                             pred_len=pred_len, T=params["T"], top_p=params["top_p"],
                             sample_count=1, verbose=False
                         )
-                    curr = input_df.iloc[-1]["close"]
                     
-                    # 预测值
+                    # 预测的未来5日收盘价
                     pred_price = pred_df.iloc[-1]["close"]
                     real_price = df.iloc[idx + pred_len]["close"]
                     
-                    pred_ret = (pred_price - curr) / curr
-                    act_ret = (real_price - curr) / curr
-                    
-                    idx_preds.append(pred_ret)
-                    idx_actuals.append(act_ret)
+                    # 收集价格序列（报告中说的是"未来5日收盘价预测序列与真实序列"）
+                    idx_pred_prices.append(pred_price)
+                    idx_actual_prices.append(real_price)
 
                 except Exception: continue
 
-            if len(idx_preds) < 2: results[name] = -1.0
+            if len(idx_pred_prices) < 2: results[name] = -1.0
             else:
                 try:
-                    # 根据报告要求：使用 Spearman 相关系数作为唯一的参数选择标准
-                    ret_corr, _ = spearmanr(idx_actuals, idx_preds)
-                    if np.isnan(ret_corr): ret_corr = -999.0
+                    # 报告要求：计算"未来5日收盘价预测序列与真实序列间"的 Spearman 相关系数
+                    price_corr, _ = spearmanr(idx_actual_prices, idx_pred_prices)
+                    if np.isnan(price_corr): price_corr = -999.0
                     
-                    results[name] = ret_corr
+                    results[name] = price_corr
                     
                 except Exception: continue
         if name not in results:
