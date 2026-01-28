@@ -135,24 +135,20 @@ class ParameterOptimizer:
                 results[name] = -1.0
                 continue
             
-            total_days = len(valid_indices)
-            
-            if total_days <= 30:
-                step = 1
-            else:
-                target_samples = 30
-                step = max(1, total_days // target_samples)
-            
-            sampled_indices = valid_indices[::step]
+            # 【关键修改】不再采样，使用验证集全部数据以获得更稳定的相关系数
+            sampled_indices = valid_indices
 
-            # 收集价格预测序列（报告中的关键指标）
-            idx_pred_prices, idx_actual_prices = [], []
+            # 收集完整的5天预测序列和真实序列
+            all_pred_prices, all_actual_prices = [], []
 
             for idx in sampled_indices:
                 if idx < lookback: continue
                 real_input_len = lookback - 1
                 input_df = df.iloc[idx - real_input_len + 1 : idx + 1]
                 if len(input_df) != real_input_len: continue
+                
+                # 确保有足够的未来数据
+                if idx + pred_len >= len(df): continue
                 
                 try:
                     with torch.no_grad():
@@ -163,21 +159,22 @@ class ParameterOptimizer:
                             sample_count=1, verbose=False
                         )
                     
-                    # 预测的未来5日收盘价
-                    pred_price = pred_df.iloc[-1]["close"]
-                    real_price = df.iloc[idx + pred_len]["close"]
-                    
-                    # 收集价格序列（报告中说的是"未来5日收盘价预测序列与真实序列"）
-                    idx_pred_prices.append(pred_price)
-                    idx_actual_prices.append(real_price)
+                    # 收集未来5天的所有预测值和真实值（不只是第5天）
+                    for day in range(pred_len):
+                        if day < len(pred_df):
+                            pred_price = pred_df.iloc[day]["close"]
+                            real_price = df.iloc[idx + 1 + day]["close"]
+                            all_pred_prices.append(pred_price)
+                            all_actual_prices.append(real_price)
 
                 except Exception: continue
 
-            if len(idx_pred_prices) < 2: results[name] = -1.0
+            if len(all_pred_prices) < 2: results[name] = -1.0
             else:
                 try:
-                    # 报告要求：计算"未来5日收盘价预测序列与真实序列间"的 Spearman 相关系数
-                    price_corr, _ = spearmanr(idx_actual_prices, idx_pred_prices)
+                    # 报告要求：计算"未来5日收盘价预测序列与真实序列间"的Spearman相关系数
+                    # 这里的"序列"指的是所有5天预测的集合
+                    price_corr, _ = spearmanr(all_actual_prices, all_pred_prices)
                     if np.isnan(price_corr): price_corr = -999.0
                     
                     results[name] = price_corr
