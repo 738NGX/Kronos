@@ -25,6 +25,7 @@ BASE_CONFIG = {
     "T": 0.6,
     "top_p": 0.9,
     "sample_count": 10,
+    "clip_val": 5.0,  # tokenizer 和 KronosPredictor 的截断值
     # 测试范围
     "test_start": "2025-01-01",
     "test_end": "2025-09-30",
@@ -37,7 +38,6 @@ MODEL_CONFIG = {
     # 特征定义
     "feature_cols": ["open", "high", "low", "close", "volume", "amount"],
     "time_feature_cols": ["minute", "hour", "weekday", "day", "month"],
-    "clip_val": 5.0,
 }
 
 FINETUNE_CONFIG = BASE_CONFIG | MODEL_CONFIG

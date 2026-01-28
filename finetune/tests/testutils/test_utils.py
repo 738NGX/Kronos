@@ -141,11 +141,9 @@ def run_distributed_inference(
     model_name,
     rank: int = 0,
     world_size: int = 1,
-    preprocess_fn=None,
-    denormalize_fn=None,
 ):
     """
-    通用多卡分布式推理
+    通用多卡分布式推理（使用 KronosPredictor 内部处理的 tokenizer 编码和归一化）
 
     Args:
         predictor: KronosPredictor 实例
@@ -156,8 +154,6 @@ def run_distributed_inference(
         model_name: 模型名称 (base/finetuned)
         rank: 当前进程 rank
         world_size: 总进程数
-        preprocess_fn: 可选预处理函数（finetuned 使用）
-        denormalize_fn: 可选反归一化函数（finetuned 使用）
 
     Returns:
         tuple: (all_metrics, all_results) 仅 rank==0 时非空
@@ -188,11 +184,11 @@ def run_distributed_inference(
     test_dates_dict = {}
     for name in indices_data.keys():
         df = indices_data[name]
-        # 只包含满足 lookback 要求的日期
+        # 只包含满足 lookback 要求的日期（test_indices 现在是位置索引）
         valid_dates = []
-        for idx in test_indices_dict[name]:
-            if idx >= config['lookback']:
-                valid_dates.append(df.loc[idx, "date"])
+        for iloc_idx in test_indices_dict[name]:
+            if iloc_idx >= config['lookback']:
+                valid_dates.append(df.iloc[iloc_idx]["date"])
         test_dates_dict[name] = set(valid_dates)
     
     all_dates_set = [test_dates_dict[name] for name in indices_data.keys()]
@@ -203,11 +199,11 @@ def run_distributed_inference(
             print("❌ No common test dates across all valid indices!")
         return [], {}
 
-    # 为每个指数建立日期到行索引的映射
+    # 为每个指数建立日期到行位置索引的映射（使用 iloc 位置，不是标签）
     date_to_idx_map = {}
     for name in indices_data.keys():
         df = indices_data[name]
-        date_to_idx_map[name] = {date: idx for idx, date in zip(df.index, df["date"])}
+        date_to_idx_map[name] = {date: iloc_idx for iloc_idx, date in enumerate(df["date"])}
 
     my_dates = common_dates[rank::world_size]
 
@@ -229,8 +225,7 @@ def run_distributed_inference(
         batch_current_closes = []
         batch_current_dates = []
         batch_dfs = []
-        batch_means = []
-        batch_stds = []
+        batch_future_dfs = []
 
         for name in indices_data.keys():
             df = indices_data[name]
@@ -238,32 +233,46 @@ def run_distributed_inference(
             if idx is None or idx < config['lookback']:
                 continue
             
-            input_df = df.iloc[idx - config['lookback'] + 1 : idx + 1].copy()
+            # 检查未来数据是否足够
+            if idx + config['pred_len'] >= len(df):
+                continue  # 跳过末尾没有足够未来数据的日期
+            
+            input_df = df.iloc[idx - config['lookback'] : idx].copy()
             current_close = df.iloc[idx]["close"]
 
-            future_dates = pd.bdate_range(start=current_date + pd.Timedelta(days=1), periods=config['pred_len'])
+            # 从真实数据中提取未来日期和数据，而不是生成假日期
+            future_df = df.iloc[idx + 1 : idx + 1 + config['pred_len']].copy().reset_index(drop=True)
+            future_dates = future_df["date"]
 
-            if preprocess_fn is not None:
-                x_norm, x_stamp, x_mean, x_std = preprocess_fn(input_df, config)
-                norm_input_df = pd.DataFrame(x_norm, columns=config.get("feature_cols", ["open", "high", "low", "close", "volume", "amount"]))
-                norm_input_df["date"] = input_df["date"].values
-                batch_inputs.append(norm_input_df)
-                batch_means.append(x_mean)
-                batch_stds.append(x_std)
-            else:
-                batch_inputs.append(input_df)
-                batch_means.append(None)
-                batch_stds.append(None)
+            # KronosPredictor 内部处理归一化和 tokenizer 编码，直接传递原始数据
+            batch_inputs.append(input_df)
 
-            batch_x_timestamps.append(pd.Series(input_df["date"]))
-            batch_y_timestamps.append(pd.Series(future_dates))
+            # 确保时间戳是 datetime 类型（calc_time_stamps 需要）
+            x_ts = pd.to_datetime(input_df["date"])
+            y_ts = pd.to_datetime(future_dates)
+            
+            batch_x_timestamps.append(x_ts)
+            batch_y_timestamps.append(y_ts)
             batch_names.append(name)
             batch_current_closes.append(current_close)
             batch_current_dates.append(current_date)
             batch_dfs.append(df)
+            batch_future_dfs.append(future_df)
         
         # 如果当前日期没有满足条件的指数，跳过
         if not batch_names:
+            continue
+        
+        # 验证批量预测的必要条件：所有序列长度必须相同
+        if len(set(len(inp) for inp in batch_inputs)) != 1:
+            if rank == 0:
+                print(f"⚠️ 日期 {current_date}: 输入序列长度不一致，跳过")
+            continue
+        
+        # 验证所有序列的未来时间戳长度都相同
+        if len(set(len(ts) for ts in batch_y_timestamps)) != 1:
+            if rank == 0:
+                print(f"⚠️ 日期 {current_date}: 预测长度不一致，跳过")
             continue
 
         try:
@@ -283,7 +292,7 @@ def run_distributed_inference(
                 pred_out = pred_outs[j]
                 current_date = batch_current_dates[j]
                 current_close = batch_current_closes[j]
-                df = batch_dfs[j]
+                future_df = batch_future_dfs[j]  # 真实的未来数据
 
                 row = {
                     "date": current_date,
@@ -291,16 +300,14 @@ def run_distributed_inference(
                 }
 
                 for k in range(config['pred_len']):
-                    if preprocess_fn is not None and denormalize_fn is not None:
-                        pred_z = pred_out.iloc[k]["close"]
-                        pred_price = denormalize_fn(pred_z, batch_means[j], batch_stds[j], target_col_idx=3)
-                    else:
-                        pred_price = pred_out.iloc[k]["close"]
+                    # KronosPredictor 已内部处理tokenizer编码和反归一化，直接取价格
+                    pred_price = pred_out.iloc[k]["close"]
 
                     row[f"pred_t+{k+1}"] = pred_price
 
-                    if idx + 1 + k < len(df):
-                        row[f"real_t+{k+1}"] = df.iloc[idx + 1 + k]["close"]
+                    # 从真实的未来数据中获取真实值，使用日期对齐而非行索引
+                    if k < len(future_df):
+                        row[f"real_t+{k+1}"] = future_df.iloc[k]["close"]
                     else:
                         row[f"real_t+{k+1}"] = np.nan
 

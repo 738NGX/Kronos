@@ -14,7 +14,7 @@ from testutils.test_utils import (
     run_distributed_inference,
 )
 from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
-from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
+from testutils.data_utils import read_test_data
 import torch.distributed as dist
 
 setup_environment()
@@ -220,7 +220,8 @@ def run_rolling_system():
         tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
         model = Kronos.from_pretrained(CONFIG['model_path'])
         predictor = KronosPredictor(
-            model, tokenizer, device=CONFIG['device'], max_context=512
+            model, tokenizer, device=CONFIG['device'], max_context=512,
+            clip=CONFIG['clip_val']
         )
         print("   ✅ 模型加载成功")
     except Exception as e:
@@ -342,8 +343,6 @@ def run_rolling_system():
                 model_name=f"temp_{p_name}_{name}",
                 rank=rank,
                 world_size=world_size,
-                preprocess_fn=preprocess_window_finetuned,
-                denormalize_fn=denormalize,
             )
 
             if rank == 0:

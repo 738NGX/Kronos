@@ -9,7 +9,7 @@ from testutils.test_utils import (
     run_distributed_inference,
 )
 from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
-from testutils.data_utils import read_test_data, preprocess_window_finetuned, denormalize
+from testutils.data_utils import read_test_data
 
 setup_environment()
 from model import Kronos, KronosTokenizer, KronosPredictor
@@ -45,7 +45,8 @@ def run_inference(combine_plots=True):
     predictor = KronosPredictor(
         model, tokenizer, 
         device=CONFIG['device'], 
-        max_context=CONFIG['lookback']
+        max_context=CONFIG['lookback'],
+        clip=CONFIG['clip_val']
     )
     
     all_metrics, all_results = run_distributed_inference(
@@ -57,8 +58,6 @@ def run_inference(combine_plots=True):
         model_name="finetuned",
         rank=rank,
         world_size=world_size,
-        preprocess_fn=preprocess_window_finetuned,
-        denormalize_fn=denormalize,
     )
 
     if rank == 0:

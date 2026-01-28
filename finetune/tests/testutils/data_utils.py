@@ -74,11 +74,11 @@ def load_and_prepare_index_data(all_data, name, symbol, config):
         print(f"⚠️ Failed to process {name}: {e}")
         return None, None
 
-    # 筛选测试日期范围
+    # 筛选测试日期范围（返回满足条件的行的位置索引）
     test_start_dt = pd.to_datetime(config['test_start'])
     test_end_dt = pd.to_datetime(config['test_end'])
     mask = (df["date"] >= test_start_dt) & (df["date"] <= test_end_dt)
-    test_indices = df[mask].index
+    test_indices = np.where(mask)[0].tolist()  # 返回 True 位置的列表 [iloc_0, iloc_1, ...]
     
     if len(test_indices) == 0:
         print(f"Skipping {name}: No data in test range.")
@@ -99,61 +99,3 @@ def preprocess_window_base(df_window, feature_cols=None):
     """
     return df_window
 
-
-def preprocess_window_finetuned(df_window, config):
-    """
-    微调模型的窗口预处理：实例级Z-Score归一化
-    
-    Args:
-        df_window: pd.DataFrame, 输入数据窗口
-        config: dict, 配置字典，需包含:
-            - feature_cols: 特征列列表
-            - time_feature_cols: 时间特征列列表
-            - clip_val: 截断值
-    
-    Returns:
-        tuple, (x_norm, x_stamp, x_mean, x_std)
-            - x_norm: np.array, 归一化后的特征
-            - x_stamp: np.array, 时间戳特征
-            - x_mean: np.array, 特征均值（用于反归一化）
-            - x_std: np.array, 特征标准差（用于反归一化）
-    """
-    # 构造时间特征
-    dates = df_window["date"].dt
-    
-    time_feats = pd.DataFrame({
-        "minute": dates.minute,
-        "hour": dates.hour,
-        "weekday": dates.weekday,
-        "day": dates.day,
-        "month": dates.month
-    })
-    
-    # 提取基础特征
-    x_raw = df_window[config["feature_cols"]].values.astype(np.float32)
-    x_stamp = time_feats[config["time_feature_cols"]].values.astype(np.float32)
-    
-    # 实例级归一化
-    x_mean = np.mean(x_raw, axis=0)
-    x_std = np.std(x_raw, axis=0)
-    
-    x_norm = (x_raw - x_mean) / (x_std + 1e-5)
-    x_norm = np.clip(x_norm, -config["clip_val"], config["clip_val"])
-    
-    return x_norm, x_stamp, x_mean, x_std
-
-
-def denormalize(pred_norm, x_mean, x_std, target_col_idx=3):
-    """
-    反归一化：将模型输出的 Z-Score 还原为绝对价格
-    
-    Args:
-        pred_norm: float, 归一化的预测值
-        x_mean: np.array, 输入窗口的特征均值
-        x_std: np.array, 输入窗口的特征标准差
-        target_col_idx: int, 目标列索引（3对应'close'）
-    
-    Returns:
-        float, 还原后的绝对价格
-    """
-    return pred_norm * (x_std[target_col_idx] + 1e-5) + x_mean[target_col_idx]

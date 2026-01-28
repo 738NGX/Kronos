@@ -39,7 +39,8 @@ def run_reproduction(combine_plots=True):
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
     model = Kronos.from_pretrained("NeoQuasar/Kronos-base")
     predictor = KronosPredictor(
-        model, tokenizer, device=CONFIG["device"], max_context=CONFIG["lookback"]
+        model, tokenizer, device=CONFIG["device"], max_context=CONFIG["lookback"],
+        clip=CONFIG['clip_val']
     )
 
     all_metrics, all_results = run_distributed_inference(
