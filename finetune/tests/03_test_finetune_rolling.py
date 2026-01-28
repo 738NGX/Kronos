@@ -145,9 +145,7 @@ class ParameterOptimizer:
             
             sampled_indices = valid_indices[::step]
 
-            # 🔥 修改 1: 增加价格列表容器
-            idx_preds, idx_actuals = [], []
-            idx_pred_prices, idx_act_prices = [], [] 
+            idx_preds, idx_actuals = [], [] 
 
             for idx in sampled_indices:
                 if idx < lookback: continue
@@ -174,30 +172,17 @@ class ParameterOptimizer:
                     
                     idx_preds.append(pred_ret)
                     idx_actuals.append(act_ret)
-                    
-                    # 🔥 修改 2: 收集绝对价格
-                    idx_pred_prices.append(pred_price)
-                    idx_act_prices.append(real_price)
 
                 except Exception: continue
 
             if len(idx_preds) < 2: results[name] = -1.0
             else:
                 try:
-                    # 1. 计算收益率相关性 (IC)
+                    # 根据报告要求：使用 Spearman 相关系数作为唯一的参数选择标准
                     ret_corr, _ = spearmanr(idx_actuals, idx_preds)
-                    if np.isnan(ret_corr): ret_corr = -1.0
+                    if np.isnan(ret_corr): ret_corr = -999.0
                     
-                    # 🔥 修改 3: 计算价格相关性 (Price Corr)
-                    # 使用 Pearson 计算价格趋势的相关性
-                    price_corr = np.corrcoef(idx_act_prices, idx_pred_prices)[0, 1]
-                    if np.isnan(price_corr): price_corr = 0.0
-                    
-                    # 🔥 修改 4: 定义复合得分 (Composite Score)
-                    # 逻辑：既要 IC 高，也要 Price Corr 高
-                    final_score = ret_corr + 0.5 * price_corr
-
-                    results[name] = final_score
+                    results[name] = ret_corr
                     
                 except Exception: continue
         if name not in results:
