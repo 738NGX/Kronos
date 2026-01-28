@@ -118,7 +118,7 @@ class ParameterOptimizer:
                 else:
                     p = final_best_params[name]
                     ic = final_best_ic[name]
-                    print(f"     ✅ {name}: IC={ic:.4f} (T={p['T']}, LB={p['lookback']})")
+                    print(f"     ✅ {name}: IC={ic:.4f} (T={p['T']},top_p ={p['top_p']} , LB={p['lookback']})")
             
             return final_best_params
         
