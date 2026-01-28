@@ -245,7 +245,7 @@ def run_distributed_inference(
 
             if preprocess_fn is not None:
                 x_norm, x_stamp, x_mean, x_std = preprocess_fn(input_df, config)
-                norm_input_df = pd.DataFrame(x_norm, columns=config.get("feature_cols", ["open", "high", "low", "close", "volume"]))
+                norm_input_df = pd.DataFrame(x_norm, columns=config.get("feature_cols", ["open", "high", "low", "close", "volume", "amount"]))
                 norm_input_df["date"] = input_df["date"].values
                 batch_inputs.append(norm_input_df)
                 batch_means.append(x_mean)
