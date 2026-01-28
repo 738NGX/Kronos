@@ -130,48 +130,36 @@ class ParameterOptimizer:
         results = {}
 
         for name, df in val_data.items():
-            # 获取验证集区间内的有效日期索引
             date_mask = (df["date"] >= val_start) & (df["date"] <= val_end)
             all_indices = df[date_mask].index.tolist()
-            valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len)]
+            valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len) and i >= lookback]
             
-            all_pred_rets = []
-            all_actual_rets = []
+            daily_sequence_corrs = []
 
             for idx in valid_indices:
-                # 确定输入序列与预测基准价格
                 input_df = df.iloc[idx - lookback + 1 : idx + 1]
-                current_price = df.iloc[idx]["close"]
-                
-                # y_timestamp 必须严格对应未来 pred_len 天的真实日期
                 future_dates = df.iloc[idx + 1 : idx + 1 + pred_len]["date"]
                 
-                # 推理：产生预测路径
                 pred_df = self.predictor.predict(
-                    df=input_df, 
-                    x_timestamp=input_df["date"],
+                    df=input_df, x_timestamp=input_df["date"],
                     y_timestamp=future_dates,
-                    pred_len=pred_len, 
-                    T=params["T"], 
-                    top_p=params["top_p"],
-                    sample_count=1, 
-                    verbose=False
+                    pred_len=pred_len, T=params["T"], top_p=params["top_p"],
+                    sample_count=1, verbose=False
                 )
                 
-                # 计算预测路径中每一天相对于当前价格的收益率 (P_future / P_current - 1)
-                # 这一步去除了价格绝对量纲，强制模型必须在“变动趋势”上与真实序列对齐
-                for day in range(pred_len):
-                    p_val = pred_df.iloc[day]["close"]
-                    r_val = df.iloc[idx + 1 + day]["close"]
-                    
-                    all_pred_rets.append(p_val / current_price - 1)
-                    all_actual_rets.append(r_val / current_price - 1)
-
-            # 基于收益率序列计算全局 Spearman 相关系数
-            # 只有在趋势（Rank）上高度一致，才能获得类似报告中的 0.8+ 高分
-            score, _ = spearmanr(all_actual_rets, all_pred_rets)
-            results[name] = score
+                # 【关键修复】计算单次预测序列（长度为5）与真实序列的相关性
+                actual_seq = df.iloc[idx + 1 : idx + 1 + pred_len]["close"].values
+                pred_seq = pred_df["close"].values
                 
+                corr, _ = spearmanr(actual_seq, pred_seq)
+                
+                # 仅在计算出有效数值时统计
+                if not np.isnan(corr):
+                    daily_sequence_corrs.append(corr)
+
+            # 取每日序列相关性的算术平均值作为该参数组在验证集上的得分
+            results[name] = np.mean(daily_sequence_corrs)
+                    
         return results
 
 def run_rolling_system():
