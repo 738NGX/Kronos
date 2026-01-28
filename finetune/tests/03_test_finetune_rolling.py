@@ -315,45 +315,44 @@ def run_rolling_system():
                 if name in p_results:
                     global_pred_buffers[name].append(p_results[name])
 
-    # 4. 汇总、拼接与保存 (Rank 0 only)
+    # 4. 汇总、拼接与全局指标计算 (Rank 0 only)
     if rank == 0:
-        print("\n[4/4] 汇总数据与绘图...")
+        print("\n[4/4] 汇总全样本数据并计算全局指标...")
         
-        # === 拼接所有月份的预测结果 ===
         final_full_predictions = {}
+        global_metrics_list = []
         
         for name, df_list in global_pred_buffers.items():
-            if df_list:
-                full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
-                final_full_predictions[name] = full_df
-                
-                save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
-                full_df.to_csv(save_path, index=False)
-                print(f"   💾 已保存完整预测: {save_path} (Rows: {len(full_df)})")
-            else:
-                print(f"   ⚠️ 未收集到指数 {name} 的预测数据")
+            # 拼接全样本预测
+            full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
+            final_full_predictions[name] = full_df
+            
+            # 保存完整预测 CSV
+            save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
+            full_df.to_csv(save_path, index=False)
+            
+            # 【关键修改】直接在拼接后的全样本上调用 calculate_metrics
+            # 这将计算包含跨月价格趋势的 Global IC，对齐报告 0.856 口径
+            from testutils.metrics_utils import calculate_metrics
+            idx_global_metrics = calculate_metrics(full_df)
+            idx_global_metrics["Index"] = name
+            global_metrics_list.append(idx_global_metrics)
+            
+            print(f"   ✅ {name}: 全样本 Global IC 汇总完成")
 
-        # === 分离明细保存与汇总展示 ===
-        if all_metrics_buffer:
-            print(f"   📊 正在合并 {len(all_metrics_buffer)} 个分片 Metrics...")
+        # 保存并展示全局指标
+        if global_metrics_list:
+            df_global = pd.concat(global_metrics_list, ignore_index=True)
             
-            # 1. 纵向拼接所有分片
-            df_metrics = pd.concat(all_metrics_buffer, ignore_index=True)
+            # 专门保存一份对齐报告口径的汇总文件
+            aggregate_and_save_metrics([df_global], OUTPUT_DIR, "rolling_global_final")
             
-            # 2. 保存明细
-            detail_save_path = os.path.join(OUTPUT_DIR, "rolling_metrics_detailed.csv")
-            df_metrics.to_csv(detail_save_path, index=False)
-            print(f"   💾 已保存分月明细指标: {detail_save_path}")
-
-            # 3. 计算平均
-            df_avg = df_metrics.groupby(['Index', 'horizon']).mean(numeric_only=True).reset_index()
-            
-            aggregate_and_save_metrics([df_avg], OUTPUT_DIR, "rolling_all_avg")
-            
-        else:
-            print("   ⚠️ Metrics Buffer 为空，跳过汇总")
+            print("\n🏆 [报告口径汇总] 全样本绝对价格相关性 (Global Price Corr):")
+            # 筛选 T+5 的结果直接与报告 0.856 进行对比
+            t5_results = df_global[df_global['horizon'] == 'T+5']
+            print(t5_results[['Index', 'horizon', 'price_corr', 'price_mae']])
         
-        print(f"\n🎨 正在为 {len(final_full_predictions)} 个指数生成图表...")
+        # 绘图逻辑保持不变
         plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_subplots=True)
 
         # 清理批次推理生成的临时预测文件
