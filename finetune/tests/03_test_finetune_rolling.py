@@ -131,8 +131,9 @@ class ParameterOptimizer:
 
         for name, df in val_data.items():
             # 获取验证集区间内的有效日期索引
-            mask = (df["date"] >= val_start) & (df["date"] <= val_end - pd.Timedelta(days=pred_len))
-            valid_indices = df[mask].index.tolist()
+            date_mask = (df["date"] >= val_start) & (df["date"] <= val_end)
+            all_indices = df[date_mask].index.tolist()
+            valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len)]
             
             all_pred_rets = []
             all_actual_rets = []
