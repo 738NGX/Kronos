@@ -43,7 +43,7 @@ def run_reproduction(combine_plots=True):
         clip=CONFIG['clip_val']
     )
 
-    all_metrics, all_results = run_distributed_inference(
+    all_results = run_distributed_inference(
         predictor=predictor,
         all_data=all_data,
         indices_dict=INDICES,
@@ -55,7 +55,7 @@ def run_reproduction(combine_plots=True):
     )
     
     if rank == 0:
-        aggregate_and_save_metrics(all_metrics, OUTPUT_DIR, "base")
+        aggregate_and_save_metrics(all_results, OUTPUT_DIR, "base")
         plot_all_results(all_results, OUTPUT_DIR, "base", CONFIG, combine_plots)
 
 

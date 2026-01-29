@@ -76,19 +76,34 @@ def save_prediction_results(predictions, output_dir, model_name, index_name):
     return res_df
 
 
-def aggregate_and_save_metrics(all_metrics, output_dir, model_name):
+def aggregate_and_save_metrics(all_results, output_dir, model_name):
     """
-    汇总所有指标并保存
+    基于全样本拼接后的完整时间序列重新计算指标并保存
     
     Args:
-        all_metrics: list, 所有指数的指标列表
+        all_results: dict, 所有指数的完整预测结果 DataFrame
         output_dir: str, 输出目录
         model_name: str, 模型名称
     
     Returns:
         pd.DataFrame: 汇总后的指标DataFrame
     """
-    from testutils.metrics_utils import save_and_print_metrics
+    from testutils.metrics_utils import calculate_metrics, save_and_print_metrics
+    
+    if not all_results:
+        return None
+    
+    all_metrics = []
+    
+    # 对每个指数的完整时间序列计算指标
+    for name, full_df in all_results.items():
+        if full_df is None or full_df.empty:
+            continue
+        
+        # 基于完整时间序列计算指标（包含跨时间段的趋势）
+        idx_metrics = calculate_metrics(full_df)
+        idx_metrics["Index"] = name
+        all_metrics.append(idx_metrics)
     
     if all_metrics:
         final_df = pd.concat(all_metrics, ignore_index=True)
@@ -343,7 +358,6 @@ def run_distributed_inference(
                     merged_results[name].extend(gpu_results[name])
             local_results = merged_results
 
-    all_metrics = []
     final_results = {}
 
     if rank == 0:
@@ -358,9 +372,8 @@ def run_distributed_inference(
 
                 idx_metrics = calculate_metrics(res_df)
                 idx_metrics["Index"] = name
-                all_metrics.append(idx_metrics)
 
                 final_results[name] = res_df
                 print(f"   ✅ {name}: {len(res_df)} 条预测")
 
-    return all_metrics, final_results
+    return final_results
