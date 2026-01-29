@@ -415,10 +415,9 @@ def run_rolling_system():
             df_global = pd.concat(global_metrics_list, ignore_index=True)
 
             # 专门保存一份对齐报告口径的汇总文件
-            aggregate_and_save_metrics([df_global], OUTPUT_DIR, "rolling_global_final")
+            aggregate_and_save_metrics(df_global, OUTPUT_DIR, "rolling_global_final")
 
-            print("\n🏆 [报告口径汇总] 全样本绝对价格相关性 (Global Price Corr):")
-            # 筛选 T+5 的结果直接与报告 0.856 进行对比
+            print("\n🏆 全样本绝对价格相关性 (Global Price Corr):")
             t5_results = df_global[df_global["horizon"] == "T+5"]
             print(t5_results[["Index", "horizon", "price_corr", "price_mae"]])
 
