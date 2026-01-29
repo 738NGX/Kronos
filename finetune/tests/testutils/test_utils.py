@@ -81,7 +81,7 @@ def aggregate_and_save_metrics(all_results, output_dir, model_name):
     基于全样本拼接后的完整时间序列重新计算指标并保存
     
     Args:
-        all_results: dict, 所有指数的完整预测结果 DataFrame
+        all_results: dict 或 DataFrame，所有指数的完整预测结果
         output_dir: str, 输出目录
         model_name: str, 模型名称
     
@@ -90,6 +90,14 @@ def aggregate_and_save_metrics(all_results, output_dir, model_name):
     """
     from testutils.metrics_utils import calculate_metrics, save_and_print_metrics
     
+    # 处理 DataFrame 输入（直接调用时）
+    if isinstance(all_results, pd.DataFrame):
+        if all_results.empty:
+            return None
+        save_and_print_metrics(all_results, output_dir, model_name=model_name)
+        return all_results
+    
+    # 处理字典输入
     if not all_results:
         return None
     
