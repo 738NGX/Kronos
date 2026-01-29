@@ -161,9 +161,9 @@ class ParameterOptimizer:
             all_indices = df[date_mask].index.tolist()
             valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len) and i >= lookback]
 
-            daily_corrs = []
-            pred_returns_list = []
-            actual_returns_list = []
+            daily_sequence_corrs = []
+            pred_t5_returns = []
+            actual_t5_returns = []
 
             for idx in valid_indices:
                 current_close = df.iloc[idx]["close"]
@@ -177,26 +177,27 @@ class ParameterOptimizer:
                     sample_count=1, verbose=False,
                 )
 
-                # --- 1. 锚定当前价的序列相关性 (Anchored Sequence IC) ---
-                # 插入今日收盘价作为序列起点，强制对齐变动方向
-                actual_seq_with_anchor = np.insert(future_df["close"].values, 0, current_close)
-                pred_seq_with_anchor = np.insert(pred_df["close"].values, 0, current_close)
-                seq_corr, _ = spearmanr(actual_seq_with_anchor, pred_seq_with_anchor)
-                daily_corrs.append(seq_corr)
+                # 1. 每日路径相关性 (含 T=0 锚点)
+                actual_seq = np.insert(future_df["close"].values, 0, current_close)
+                pred_seq = np.insert(pred_df["close"].values, 0, current_close)
+                seq_corr, _ = spearmanr(actual_seq, pred_seq)
+                daily_sequence_corrs.append(seq_corr)
 
-                # --- 2. 收集全月收益率数据 ---
-                # 计算 T+5 收益率用于全局排序评估
-                p_ret = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
-                r_ret = future_df.iloc[pred_len - 1]["close"] / current_close - 1
-                pred_returns_list.append(p_ret)
-                actual_returns_list.append(r_ret)
+                # 2. 收集全月 T+5 端点收益率
+                p_ret_t5 = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
+                r_ret_t5 = future_df.iloc[pred_len - 1]["close"] / current_close - 1
+                pred_t5_returns.append(p_ret_t5)
+                actual_t5_returns.append(r_ret_t5)
 
-            # --- 3. 计算全局收益率相关性 (Global Return IC) ---
-            global_ic, _ = spearmanr(pred_returns_list, actual_returns_list)
+            # 全月 T+5 择时收益率的相关性 (这是策略的核心)
+            target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
+            
+            # 路径形状的平均相关性 (这是策略的辅助)
+            mean_path_ic = np.mean(daily_sequence_corrs)
 
-            # --- 4. 最终评价：序列形状相似度 与 跨时择时排序能力 均衡加权 ---
-            # 权重 0.5/0.5 可根据实际回测倾向微调
-            results[name] = 0.5 * np.mean(daily_corrs) + 0.5 * global_ic
+            # 【核心改进】将权重向 T+5 倾斜 (例如 0.8 / 0.2)
+            # 这确保了搜参系统选出的参数首要保证 T+5 算得准，其次才是中间路径画得像
+            results[name] = 0.8 * target_ic + 0.2 * mean_path_ic
 
         return results
 
