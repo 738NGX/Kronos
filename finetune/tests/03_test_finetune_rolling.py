@@ -49,107 +49,71 @@ class ParameterOptimizer:
         val_start: pd.Timestamp,
         val_end: pd.Timestamp,
     ) -> Dict[str, Dict]:
+        all_indices_names = list(val_data.keys())
+        # === 1. 按指数名称切分任务，确保同一个指数的搜参过程不跨卡 ===
+        my_indices = all_indices_names[rank::world_size]
+        
         if rank == 0:
             print(f"\n🔍 [滚动搜参] 区间: {val_start.date()} ~ {val_end.date()}")
+            print(f"   分配方案: 总指数 {len(all_indices_names)} | 显卡数 {world_size}")
 
-        min_data_len = min(len(df) for df in val_data.values())
-        max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
-        filtered_lookbacks = [
-            lb for lb in param_space["lookback"] if lb <= max_lookback_allowed
-        ]
-        if not filtered_lookbacks:
-            filtered_lookbacks = [30]
+        local_best_ic = {name: -2.0 for name in all_indices_names}
+        local_best_params = {name: None for name in all_indices_names}
 
-        final_space = {
-            "T": param_space["T"],
-            "top_p": param_space["top_p"],
-            "lookback": filtered_lookbacks,
-        }
-        param_names = list(final_space.keys())
-        all_combinations = list(product(*final_space.values()))
+        param_names = list(param_space.keys())
+        
+        for name in my_indices:
+            df = val_data[name]
+            # 计算当前指数允许的最大 lookback
+            min_data_len = len(df)
+            max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
+            filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
+            if not filtered_lookbacks:
+                filtered_lookbacks = [30]
 
-        # === 🔥 并行切分 ===
-        my_combinations = all_combinations[rank::world_size]
-        total_tasks = len(my_combinations)
+            current_space = {
+                "T": param_space["T"],
+                "top_p": param_space["top_p"],
+                "lookback": filtered_lookbacks,
+            }
+            current_combos = list(product(*current_space.values()))
 
-        if rank == 0:
-            print(
-                f"   ⚙️ 总组合: {len(all_combinations)} | 显卡数: {world_size} | 单卡任务: ~{total_tasks}"
-            )
+            print(f"   🚀 [GPU-{rank}] 搜索指数: {name} ({len(current_combos)} 组合)")
 
-        local_best_ic = {name: -2.0 for name in val_data.keys()}
-        local_best_params = {name: None for name in val_data.keys()}
-
-        log_interval = max(1, total_tasks // 5)
-
-        import time
-
-        start_time = time.time()
-
-        for i, combo in enumerate(my_combinations):
-            params = dict(zip(param_names, combo))
-            scores_dict = self._evaluate_params_per_index(
-                val_data, params, val_start, val_end
-            )
-
-            for name, score in scores_dict.items():
+            for combo in current_combos:
+                params = dict(zip(param_names, combo))
+                # 传入单指数数据进行评估
+                scores_dict = self._evaluate_params_per_index(
+                    {name: df}, params, val_start, val_end
+                )
+                
+                score = scores_dict[name]
+                # 注意：使用 > 而不是 >= 确保在分数完全相同时，结果也是确定的（选先出现的组合）
                 if score > local_best_ic[name]:
                     local_best_ic[name] = score
                     local_best_params[name] = params.copy()
 
-            if (i + 1) % log_interval == 0 or (i + 1) == total_tasks:
-                elapsed = time.time() - start_time
-                avg_time = elapsed / (i + 1)
-                remaining = avg_time * (total_tasks - (i + 1))
-
-                print(
-                    f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
-                    f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)"
-                )
-
-        if rank == 0:
-            print("   ⏳ 等待其他 GPU 完成任务...")
-
+        # === 2. 汇总结果 ===
         my_result = (local_best_params, local_best_ic)
         all_results_list = [None for _ in range(world_size)]
-
+        
         if world_size > 1:
-            try:
-                dist.all_gather_object(all_results_list, my_result)
-            except Exception as e:
-                print(f"❌ [Rank {rank}] Gather Error: {e}")
-                all_results_list = [my_result]
+            dist.all_gather_object(all_results_list, my_result)
         else:
             all_results_list = [my_result]
 
-        # === 决出全局最优 (仅 Rank 0) ===
-        if rank == 0:
-            final_best_params = {name: None for name in val_data.keys()}
-            final_best_ic = {name: -2.0 for name in val_data.keys()}
+        final_best_params = {name: None for name in all_indices_names}
+        final_best_ic = {name: -2.0 for name in all_indices_names}
 
-            for gpu_params, gpu_ics in all_results_list:
-                if gpu_params is None:
-                    continue
-                for name in val_data.keys():
+        # 所有 Rank 执行相同的逻辑，决出全局最优，保证同步
+        for gpu_params, gpu_ics in all_results_list:
+            for name in all_indices_names:
+                if gpu_params[name] is not None:
                     if gpu_ics[name] > final_best_ic[name]:
                         final_best_ic[name] = gpu_ics[name]
                         final_best_params[name] = gpu_params[name]
 
-            print("\n   🏆 [全局汇总] 各指数最优参数:")
-            default_params = {k: v[0] for k, v in final_space.items()}
-            for name in val_data.keys():
-                if final_best_params[name] is None:
-                    final_best_params[name] = default_params
-                else:
-                    p = final_best_params[name]
-                    ic = final_best_ic[name]
-                    print(
-                        f"     ✅ {name}: IC={ic:.4f} (T={p['T']},top_p ={p['top_p']} , LB={p['lookback']})"
-                    )
-
-            return final_best_params
-
-        return {}
+        return final_best_params
 
     def _evaluate_params_per_index(self, val_data: Dict[str, pd.DataFrame], params, val_start, val_end):
         lookback = params["lookback"]
@@ -166,6 +130,13 @@ class ParameterOptimizer:
             actual_t5_returns = []
 
             for idx in valid_indices:
+                # 无论在哪张卡上跑，只要 idx 一样，随机数序列就必须一样
+                # 使用 base_seed + idx 确保每天的随机性独立但可复现
+                base_seed = self.config.get("seed", 100)
+                torch.manual_seed(base_seed + idx)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed(base_seed + idx)
+
                 current_close = df.iloc[idx]["close"]
                 input_df = df.iloc[idx - lookback + 1 : idx + 1]
                 future_df = df.iloc[idx + 1 : idx + 1 + pred_len]
@@ -177,26 +148,18 @@ class ParameterOptimizer:
                     sample_count=1, verbose=False,
                 )
 
-                # 1. 每日路径相关性 (含 T=0 锚点)
                 actual_seq = np.insert(future_df["close"].values, 0, current_close)
                 pred_seq = np.insert(pred_df["close"].values, 0, current_close)
                 seq_corr, _ = spearmanr(actual_seq, pred_seq)
                 daily_sequence_corrs.append(seq_corr)
 
-                # 2. 收集全月 T+5 端点收益率
                 p_ret_t5 = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
                 r_ret_t5 = future_df.iloc[pred_len - 1]["close"] / current_close - 1
                 pred_t5_returns.append(p_ret_t5)
                 actual_t5_returns.append(r_ret_t5)
 
-            # 全月 T+5 择时收益率的相关性 (这是策略的核心)
             target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
-            
-            # 路径形状的平均相关性 (这是策略的辅助)
             mean_path_ic = np.mean(daily_sequence_corrs)
-
-            # 【核心改进】将权重向 T+5 倾斜 (例如 0.8 / 0.2)
-            # 这确保了搜参系统选出的参数首要保证 T+5 算得准，其次才是中间路径画得像
             results[name] = 0.8 * target_ic + 0.2 * mean_path_ic
 
         return results
@@ -417,8 +380,6 @@ def run_rolling_system():
             save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
             full_df.to_csv(save_path, index=False)
 
-            # 【关键修改】直接在拼接后的全样本上调用 calculate_metrics
-            # 这将计算包含跨月价格趋势的 Global IC，对齐报告 0.856 口径
             from testutils.metrics_utils import calculate_metrics
 
             idx_global_metrics = calculate_metrics(full_df)
@@ -431,7 +392,6 @@ def run_rolling_system():
         if global_metrics_list:
             df_global = pd.concat(global_metrics_list, ignore_index=True)
 
-            # 专门保存一份对齐报告口径的汇总文件
             aggregate_and_save_metrics(df_global, OUTPUT_DIR, "rolling_global_final")
 
             print("\n🏆 全样本绝对价格相关性 (Global Price Corr):")

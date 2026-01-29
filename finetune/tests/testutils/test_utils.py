@@ -165,22 +165,6 @@ def run_distributed_inference(
     rank: int = 0,
     world_size: int = 1,
 ):
-    """
-    通用多卡分布式推理（使用 KronosPredictor 内部处理的 tokenizer 编码和归一化）
-
-    Args:
-        predictor: KronosPredictor 实例
-        all_data: 所有指数的原始数据
-        indices_dict: 指数名称->代码 字典
-        config: 配置字典
-        output_dir: 输出目录
-        model_name: 模型名称 (base/finetuned)
-        rank: 当前进程 rank
-        world_size: 总进程数
-
-    Returns:
-        tuple: (all_metrics, all_results) 仅 rank==0 时非空
-    """
     from testutils.data_utils import load_and_prepare_index_data
     from testutils.metrics_utils import calculate_metrics
 
@@ -192,41 +176,24 @@ def run_distributed_inference(
 
     for name, symbol in indices_dict.items():
         df, test_indices = load_and_prepare_index_data(all_data, name, symbol, config)
-        if df is not None:
-            indices_data[name] = df
-            test_indices_dict[name] = test_indices
-        elif rank == 0:
-            print(f"⚠️ Skipping {name}: 数据加载失败")
+        indices_data[name] = df
+        test_indices_dict[name] = test_indices
 
-    if not indices_data:
-        if rank == 0:
-            print("❌ No valid index data found!")
-        return [], {}
-
-    # 基于日期而非行索引进行匹配
+    # 基于日期进行匹配
     test_dates_dict = {}
     for name in indices_data.keys():
         df = indices_data[name]
-        # 只包含满足 lookback 要求的日期（test_indices 现在是位置索引）
-        valid_dates = []
-        for iloc_idx in test_indices_dict[name]:
-            if iloc_idx >= config['lookback']:
-                valid_dates.append(df.iloc[iloc_idx]["date"])
+        valid_dates = [df.iloc[iloc_idx]["date"] for iloc_idx in test_indices_dict[name] if iloc_idx >= config['lookback']]
         test_dates_dict[name] = set(valid_dates)
     
     all_dates_set = [test_dates_dict[name] for name in indices_data.keys()]
     common_dates = sorted(list(set.intersection(*all_dates_set)))
 
-    if not common_dates:
-        if rank == 0:
-            print("❌ No common test dates across all valid indices!")
-        return [], {}
-
-    # 为每个指数建立日期到行位置索引的映射（使用 iloc 位置，不是标签）
-    date_to_idx_map = {}
-    for name in indices_data.keys():
-        df = indices_data[name]
-        date_to_idx_map[name] = {date: iloc_idx for iloc_idx, date in enumerate(df["date"])}
+    # 为每个指数建立日期到行位置索引的映射
+    date_to_idx_map = {
+        name: {date: iloc_idx for iloc_idx, date in enumerate(df["date"])}
+        for name, df in indices_data.items()
+    }
 
     my_dates = common_dates[rank::world_size]
 
@@ -238,7 +205,7 @@ def run_distributed_inference(
 
     import time
     start_time = time.time()
-    log_interval = max(1, max(1, len(my_dates)) // 5)
+    log_interval = max(1, len(my_dates) // 5)
 
     for i, current_date in enumerate(my_dates):
         batch_inputs = []
@@ -247,115 +214,69 @@ def run_distributed_inference(
         batch_names = []
         batch_current_closes = []
         batch_current_dates = []
-        batch_dfs = []
         batch_future_dfs = []
 
         for name in indices_data.keys():
             df = indices_data[name]
             idx = date_to_idx_map[name].get(current_date)
-            if idx is None or idx < config['lookback']:
-                continue
             
-            # 检查未来数据是否足够
-            if idx + config['pred_len'] >= len(df):
-                continue  # 跳过末尾没有足够未来数据的日期
+            # 结构性过滤逻辑
+            if idx is None or idx < config['lookback'] or idx + config['pred_len'] >= len(df):
+                continue
             
             input_df = df.iloc[idx - config['lookback'] : idx].copy()
             current_close = df.iloc[idx]["close"]
-
-            # 从真实数据中提取未来日期和数据，而不是生成假日期
             future_df = df.iloc[idx + 1 : idx + 1 + config['pred_len']].copy().reset_index(drop=True)
-            future_dates = future_df["date"]
-
-            # KronosPredictor 内部处理归一化和 tokenizer 编码，直接传递原始数据
-            batch_inputs.append(input_df)
-
-            # 确保时间戳是 datetime 类型（calc_time_stamps 需要）
-            x_ts = pd.to_datetime(input_df["date"])
-            y_ts = pd.to_datetime(future_dates)
             
-            batch_x_timestamps.append(x_ts)
-            batch_y_timestamps.append(y_ts)
+            batch_inputs.append(input_df)
+            batch_x_timestamps.append(pd.to_datetime(input_df["date"]))
+            batch_y_timestamps.append(pd.to_datetime(future_df["date"]))
             batch_names.append(name)
             batch_current_closes.append(current_close)
             batch_current_dates.append(current_date)
-            batch_dfs.append(df)
             batch_future_dfs.append(future_df)
         
-        # 如果当前日期没有满足条件的指数，跳过
         if not batch_names:
             continue
         
-        # 验证批量预测的必要条件：所有序列长度必须相同
-        if len(set(len(inp) for inp in batch_inputs)) != 1:
-            if rank == 0:
-                print(f"⚠️ 日期 {current_date}: 输入序列长度不一致，跳过")
-            continue
-        
-        # 验证所有序列的未来时间戳长度都相同
-        if len(set(len(ts) for ts in batch_y_timestamps)) != 1:
-            if rank == 0:
-                print(f"⚠️ 日期 {current_date}: 预测长度不一致，跳过")
-            continue
+        # === 核心改进：根据当前日期强制重置种子 ===
+        # 使用日期的 unix 时间戳作为种子，确保无论哪张卡处理这一天，随机序列完全一致
+        date_seed = int(pd.to_datetime(current_date).timestamp())
+        torch.manual_seed(date_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(date_seed)
 
-        try:
-            with torch.no_grad():
-                pred_outs = predictor.predict_batch(
-                    batch_inputs,
-                    batch_x_timestamps,
-                    batch_y_timestamps,
-                    pred_len=config['pred_len'],
-                    T=config['T'],
-                    top_p=config['top_p'],
-                    sample_count=config['sample_count'],
-                    verbose=False
-                )
+        # 移除 try-except，确保错误能被立即抛出而不是被静默忽略
+        pred_outs = predictor.predict_batch(
+            batch_inputs,
+            batch_x_timestamps,
+            batch_y_timestamps,
+            pred_len=config['pred_len'],
+            T=config['T'],
+            top_p=config['top_p'],
+            sample_count=config['sample_count'],
+            verbose=False
+        )
 
-            for j, name in enumerate(batch_names):
-                pred_out = pred_outs[j]
-                current_date = batch_current_dates[j]
-                current_close = batch_current_closes[j]
-                future_df = batch_future_dfs[j]  # 真实的未来数据
+        for j, name in enumerate(batch_names):
+            pred_out = pred_outs[j]
+            row = {
+                "date": batch_current_dates[j],
+                "current_close": batch_current_closes[j],
+            }
 
-                row = {
-                    "date": current_date,
-                    "current_close": current_close,
-                }
+            for k in range(config['pred_len']):
+                row[f"pred_t+{k+1}"] = pred_out.iloc[k]["close"]
+                row[f"real_t+{k+1}"] = batch_future_dfs[j].iloc[k]["close"]
 
-                for k in range(config['pred_len']):
-                    # KronosPredictor 已内部处理tokenizer编码和反归一化，直接取价格
-                    pred_price = pred_out.iloc[k]["close"]
-
-                    row[f"pred_t+{k+1}"] = pred_price
-
-                    # 从真实的未来数据中获取真实值，使用日期对齐而非行索引
-                    if k < len(future_df):
-                        row[f"real_t+{k+1}"] = future_df.iloc[k]["close"]
-                    else:
-                        row[f"real_t+{k+1}"] = np.nan
-
-                local_results[name].append(row)
-
-        except Exception as e:
-            if rank == 0:
-                print(f"⚠️ 预测失败 date={current_date}: {e}")
+            local_results[name].append(row)
 
         if (i + 1) % log_interval == 0 or (i + 1) == len(my_dates):
             elapsed = time.time() - start_time
-            avg_time = elapsed / (i + 1)
-            remaining = avg_time * max(0, len(my_dates) - (i + 1))
-            print(
-                f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{max(1,len(my_dates))} ({((i+1)/max(1,len(my_dates)))*100:.0f}%) | "
-                f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)"
-            )
-
-    if rank == 0:
-        print("   ⏳ 等待其他 GPU 完成任务...")
+            print(f"   🚀 [GPU-{rank}] 进度 {i+1}/{len(my_dates)} | ⏱️ {elapsed:.1f}s")
 
     if world_size > 1:
         dist.barrier()
-
-    if world_size > 1:
         all_results_list = [None for _ in range(world_size)]
         dist.all_gather_object(all_results_list, local_results)
 
@@ -367,21 +288,11 @@ def run_distributed_inference(
             local_results = merged_results
 
     final_results = {}
-
     if rank == 0:
         print("\n📊 汇总结果...")
         for name in indices_data.keys():
-            if local_results[name]:
-                res_df = pd.DataFrame(local_results[name])
-                res_df = res_df.sort_values("date").reset_index(drop=True)
-
-                save_path = os.path.join(output_dir, f"predictions_{model_name}_{name}.csv")
-                res_df.to_csv(save_path, index=False)
-
-                idx_metrics = calculate_metrics(res_df)
-                idx_metrics["Index"] = name
-
-                final_results[name] = res_df
-                print(f"   ✅ {name}: {len(res_df)} 条预测")
+            res_df = pd.DataFrame(local_results[name]).sort_values("date").reset_index(drop=True)
+            res_df.to_csv(os.path.join(output_dir, f"predictions_{model_name}_{name}.csv"), index=False)
+            final_results[name] = res_df
 
     return final_results
