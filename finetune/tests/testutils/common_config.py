@@ -27,7 +27,7 @@ BASE_CONFIG = {
     "sample_count": 10,
     "clip_val": 5.0,  # tokenizer 和 KronosPredictor 的截断值
     # 测试范围
-    "test_start": "2025-01-01",
+    "test_start": "2024-10-01",
     "test_end": "2025-09-30",
 }
 
