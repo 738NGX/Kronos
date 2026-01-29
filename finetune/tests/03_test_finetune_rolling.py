@@ -80,7 +80,12 @@ class ParameterOptimizer:
 
             print(f"   🚀 [GPU-{rank}] 搜索指数: {name} ({len(current_combos)} 组合)")
 
-            for combo in current_combos:
+            total_tasks = len(current_combos)
+            log_interval = max(1, total_tasks // 5)
+            import time
+            start_time = time.time()
+            
+            for i, combo in enumerate(current_combos):
                 params = dict(zip(param_names, combo))
                 # 传入单指数数据进行评估
                 scores_dict = self._evaluate_params_per_index(
@@ -92,6 +97,16 @@ class ParameterOptimizer:
                 if score > local_best_ic[name]:
                     local_best_ic[name] = score
                     local_best_params[name] = params.copy()
+                    
+                if (i + 1) % log_interval == 0 or (i + 1) == total_tasks:
+                    elapsed = time.time() - start_time
+                    avg_time = elapsed / (i + 1)
+                    remaining = avg_time * (total_tasks - (i + 1))
+
+                    print(
+                        f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
+                        f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)"
+                    )
 
         # === 2. 汇总结果 ===
         my_result = (local_best_params, local_best_ic)
@@ -112,6 +127,17 @@ class ParameterOptimizer:
                     if gpu_ics[name] > final_best_ic[name]:
                         final_best_ic[name] = gpu_ics[name]
                         final_best_params[name] = gpu_params[name]
+        print("\n   🏆 [全局汇总] 各指数最优参数:")
+        default_params = {k: v[0] for k, v in current_space.items()}
+        for name in val_data.keys():
+            if final_best_params[name] is None:
+                final_best_params[name] = default_params
+            else:
+                p = final_best_params[name]
+                ic = final_best_ic[name]
+                print(
+                    f"     ✅ {name}: IC={ic:.4f} (T={p['T']},top_p ={p['top_p']} , LB={p['lookback']})"
+                )
 
         return final_best_params
 
