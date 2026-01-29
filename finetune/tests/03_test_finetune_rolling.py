@@ -231,21 +231,44 @@ def run_rolling_system():
 
     optimizer = ParameterOptimizer(predictor, CONFIG)
 
-    # 滚动周期配置
-    rolling_periods = [
-        ("2025.01", "2024-12-01", "2024-12-31", "2025-01-01", "2025-01-31"),
-        ("2025.02", "2025-01-01", "2025-01-31", "2025-02-01", "2025-02-28"),
-        ("2025.03", "2025-02-01", "2025-02-28", "2025-03-01", "2025-03-31"),
-        ("2025.04", "2025-03-01", "2025-03-31", "2025-04-01", "2025-04-30"),
-        ("2025.05", "2025-04-01", "2025-04-30", "2025-05-01", "2025-05-31"),
-        ("2025.06", "2025-05-01", "2025-05-31", "2025-06-01", "2025-06-30"),
-        ("2025.07", "2025-06-01", "2025-06-30", "2025-07-01", "2025-07-31"),
-        ("2025.08", "2025-07-01", "2025-07-31", "2025-08-01", "2025-08-31"),
-        ("2025.09", "2025-08-01", "2025-08-31", "2025-09-01", "2025-09-30"),
-    ]
+    # 动态生成滚动周期配置（基于 CONFIG 中的 test_start 和 test_end）
+    from dateutil.relativedelta import relativedelta
+    
+    test_start_dt = pd.to_datetime(CONFIG["test_start"])
+    test_end_dt = pd.to_datetime(CONFIG["test_end"])
+    
+    # 第一个验证期往前推一个月
+    val_start_dt = test_start_dt - relativedelta(months=1)
+    
+    rolling_periods = []
+    current_val_start = val_start_dt
+    current_test_start = test_start_dt
+    
+    while current_test_start <= test_end_dt:
+        # 计算当前月份的验证期和测试期
+        current_val_end = current_test_start - pd.Timedelta(days=1)
+        current_test_end = (current_test_start + relativedelta(months=1)) - pd.Timedelta(days=1)
+        
+        # 确保不超出总测试范围
+        if current_test_end > test_end_dt:
+            current_test_end = test_end_dt
+        
+        # 格式化为 YYYY.MM 的周期名
+        period_name = current_test_start.strftime("%Y.%m")
+        
+        rolling_periods.append((
+            period_name,
+            current_val_start.strftime("%Y-%m-%d"),
+            current_val_end.strftime("%Y-%m-%d"),
+            current_test_start.strftime("%Y-%m-%d"),
+            current_test_end.strftime("%Y-%m-%d"),
+        ))
+        
+        # 移向下一个月
+        current_val_start = current_test_start
+        current_test_start = current_test_start + relativedelta(months=1)
 
     # === 初始化全局容器 ===
-    all_metrics_buffer = []
     global_pred_buffers = {name: [] for name in INDICES.keys()}
 
     # === 🔵 缓存加载逻辑 ===
@@ -356,7 +379,7 @@ def run_rolling_system():
 
             single_index_dict = {name: symbol}
 
-            p_metrics, p_results = run_distributed_inference(
+            p_results = run_distributed_inference(
                 predictor=predictor,
                 all_data=all_data,
                 indices_dict=single_index_dict,
@@ -372,12 +395,6 @@ def run_rolling_system():
                     f"     📝 [Inference] {name} 完成 ({len(p_results.get(name, [])) if p_results else 0} days)",
                     flush=True,
                 )
-
-                for m in p_metrics:
-                    m["period"] = p_name
-                    m["best_T"] = my_params["T"]
-                    m["best_LB"] = my_params["lookback"]
-                all_metrics_buffer.extend(p_metrics)
 
                 if name in p_results:
                     global_pred_buffers[name].append(p_results[name])
