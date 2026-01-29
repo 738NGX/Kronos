@@ -22,73 +22,97 @@ from model import Kronos, KronosTokenizer, KronosPredictor
 
 rank, local_rank, world_size = init_distributed_mode()
 
-CONFIG = FINETUNE_CONFIG | { "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu" }
+CONFIG = FINETUNE_CONFIG | {
+    "device": torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu"
+}
 
 PARAMS_CACHE_FILE = "/gemini/data-1/rolling_params_cache.json"
 PARAM_SEARCH_SPACE = {
     "T": [0.3, 0.6, 0.8, 1.0],
     "top_p": [0.2, 0.4, 0.6, 0.9],
-    "lookback": [30, 60, 90]
+    "lookback": [30, 60, 90],
 }
 
 OUTPUT_DIR = os.path.join(BASE_OUTPUT_DIR, "finetuned_rolling_test")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
 class ParameterOptimizer:
-    def __init__(self, predictor, config: Dict):
+    def __init__(self, predictor: KronosPredictor, config: Dict):
         self.predictor = predictor
         self.config = config
-    
-    def grid_search(self, val_data: Dict[str, pd.DataFrame], param_space: Dict, val_start: pd.Timestamp, val_end: pd.Timestamp) -> Dict[str, Dict]:
+
+    def grid_search(
+        self,
+        val_data: Dict[str, pd.DataFrame],
+        param_space: Dict,
+        val_start: pd.Timestamp,
+        val_end: pd.Timestamp,
+    ) -> Dict[str, Dict]:
         if rank == 0:
             print(f"\n🔍 [滚动搜参] 区间: {val_start.date()} ~ {val_end.date()}")
 
         min_data_len = min(len(df) for df in val_data.values())
         max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
-        filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
-        if not filtered_lookbacks: filtered_lookbacks = [30]
+        filtered_lookbacks = [
+            lb for lb in param_space["lookback"] if lb <= max_lookback_allowed
+        ]
+        if not filtered_lookbacks:
+            filtered_lookbacks = [30]
 
-        final_space = {"T": param_space["T"], "top_p": param_space["top_p"], "lookback": filtered_lookbacks}
+        final_space = {
+            "T": param_space["T"],
+            "top_p": param_space["top_p"],
+            "lookback": filtered_lookbacks,
+        }
         param_names = list(final_space.keys())
         all_combinations = list(product(*final_space.values()))
-        
+
         # === 🔥 并行切分 ===
         my_combinations = all_combinations[rank::world_size]
         total_tasks = len(my_combinations)
-        
+
         if rank == 0:
-            print(f"   ⚙️ 总组合: {len(all_combinations)} | 显卡数: {world_size} | 单卡任务: ~{total_tasks}")
+            print(
+                f"   ⚙️ 总组合: {len(all_combinations)} | 显卡数: {world_size} | 单卡任务: ~{total_tasks}"
+            )
 
         local_best_ic = {name: -2.0 for name in val_data.keys()}
         local_best_params = {name: None for name in val_data.keys()}
 
-        log_interval = max(1, total_tasks // 5) 
+        log_interval = max(1, total_tasks // 5)
 
         import time
+
         start_time = time.time()
 
         for i, combo in enumerate(my_combinations):
             params = dict(zip(param_names, combo))
-            scores_dict = self._evaluate_params_per_index(val_data, params, val_start, val_end)
-            
+            scores_dict = self._evaluate_params_per_index(
+                val_data, params, val_start, val_end
+            )
+
             for name, score in scores_dict.items():
                 if score > local_best_ic[name]:
                     local_best_ic[name] = score
                     local_best_params[name] = params.copy()
-            
+
             if (i + 1) % log_interval == 0 or (i + 1) == total_tasks:
                 elapsed = time.time() - start_time
                 avg_time = elapsed / (i + 1)
                 remaining = avg_time * (total_tasks - (i + 1))
 
-                print(f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
-                      f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)")
+                print(
+                    f"   🚀 [GPU-{rank}] 进度 {i+1:2d}/{total_tasks} ({((i+1)/total_tasks)*100:.0f}%) | "
+                    f"⏱️ {elapsed:.1f}s (剩 {remaining:.1f}s)"
+                )
 
-        if rank == 0: print("   ⏳ 等待其他 GPU 完成任务...")
-        
+        if rank == 0:
+            print("   ⏳ 等待其他 GPU 完成任务...")
+
         my_result = (local_best_params, local_best_ic)
         all_results_list = [None for _ in range(world_size)]
-        
+
         if world_size > 1:
             try:
                 dist.all_gather_object(all_results_list, my_result)
@@ -104,12 +128,13 @@ class ParameterOptimizer:
             final_best_ic = {name: -2.0 for name in val_data.keys()}
 
             for gpu_params, gpu_ics in all_results_list:
-                if gpu_params is None: continue 
+                if gpu_params is None:
+                    continue
                 for name in val_data.keys():
                     if gpu_ics[name] > final_best_ic[name]:
                         final_best_ic[name] = gpu_ics[name]
                         final_best_params[name] = gpu_params[name]
-            
+
             print("\n   🏆 [全局汇总] 各指数最优参数:")
             default_params = {k: v[0] for k, v in final_space.items()}
             for name in val_data.keys():
@@ -118,13 +143,15 @@ class ParameterOptimizer:
                 else:
                     p = final_best_params[name]
                     ic = final_best_ic[name]
-                    print(f"     ✅ {name}: IC={ic:.4f} (T={p['T']},top_p ={p['top_p']} , LB={p['lookback']})")
-            
+                    print(
+                        f"     ✅ {name}: IC={ic:.4f} (T={p['T']},top_p ={p['top_p']} , LB={p['lookback']})"
+                    )
+
             return final_best_params
-        
+
         return {}
 
-    def _evaluate_params_per_index(self, val_data, params, val_start, val_end):
+    def _evaluate_params_per_index(self, val_data: Dict[str, pd.DataFrame], params, val_start, val_end):
         lookback = params["lookback"]
         pred_len = self.config["pred_len"]
         results = {}
@@ -133,53 +160,68 @@ class ParameterOptimizer:
             date_mask = (df["date"] >= val_start) & (df["date"] <= val_end)
             all_indices = df[date_mask].index.tolist()
             valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len) and i >= lookback]
-            
-            daily_sequence_corrs = []
+
+            daily_corrs = []
+            pred_returns_list = []
+            actual_returns_list = []
 
             for idx in valid_indices:
+                current_close = df.iloc[idx]["close"]
                 input_df = df.iloc[idx - lookback + 1 : idx + 1]
-                future_dates = df.iloc[idx + 1 : idx + 1 + pred_len]["date"]
+                future_df = df.iloc[idx + 1 : idx + 1 + pred_len]
                 
                 pred_df = self.predictor.predict(
                     df=input_df, x_timestamp=input_df["date"],
-                    y_timestamp=future_dates,
+                    y_timestamp=future_df["date"],
                     pred_len=pred_len, T=params["T"], top_p=params["top_p"],
-                    sample_count=1, verbose=False
+                    sample_count=1, verbose=False,
                 )
-                
-                # 【关键修复】计算单次预测序列（长度为5）与真实序列的相关性
-                actual_seq = df.iloc[idx + 1 : idx + 1 + pred_len]["close"].values
-                pred_seq = pred_df["close"].values
-                
-                corr, _ = spearmanr(actual_seq, pred_seq)
-                
-                # 仅在计算出有效数值时统计
-                if not np.isnan(corr):
-                    daily_sequence_corrs.append(corr)
 
-            # 取每日序列相关性的算术平均值作为该参数组在验证集上的得分
-            results[name] = np.mean(daily_sequence_corrs)
-                    
+                # --- 1. 锚定当前价的序列相关性 (Anchored Sequence IC) ---
+                # 插入今日收盘价作为序列起点，强制对齐变动方向
+                actual_seq_with_anchor = np.insert(future_df["close"].values, 0, current_close)
+                pred_seq_with_anchor = np.insert(pred_df["close"].values, 0, current_close)
+                seq_corr, _ = spearmanr(actual_seq_with_anchor, pred_seq_with_anchor)
+                daily_corrs.append(seq_corr)
+
+                # --- 2. 收集全月收益率数据 ---
+                # 计算 T+5 收益率用于全局排序评估
+                p_ret = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
+                r_ret = future_df.iloc[pred_len - 1]["close"] / current_close - 1
+                pred_returns_list.append(p_ret)
+                actual_returns_list.append(r_ret)
+
+            # --- 3. 计算全局收益率相关性 (Global Return IC) ---
+            global_ic, _ = spearmanr(pred_returns_list, actual_returns_list)
+
+            # --- 4. 最终评价：序列形状相似度 与 跨时择时排序能力 均衡加权 ---
+            # 权重 0.5/0.5 可根据实际回测倾向微调
+            results[name] = 0.5 * np.mean(daily_corrs) + 0.5 * global_ic
+
         return results
 
+
 def run_rolling_system():
-    print("="*60)
+    print("=" * 60)
     print("🚀 微调版 Kronos 滚动择时系统 (最终拼接版 - 缓存优化 & 静默推理)")
-    print("="*60)
-    
+    print("=" * 60)
+
     # 1. 加载数据
     print("\n[1/4] 加载全量测试数据...")
     all_data = read_test_data()
     all_data["时间"] = pd.to_datetime(all_data["时间"])
-    
+
     # 2. 加载模型
     print("\n[2/4] 初始化模型...")
     try:
-        tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
-        model = Kronos.from_pretrained(CONFIG['model_path'])
+        tokenizer = KronosTokenizer.from_pretrained(CONFIG["tokenizer_path"])
+        model = Kronos.from_pretrained(CONFIG["model_path"])
         predictor = KronosPredictor(
-            model, tokenizer, device=CONFIG['device'], max_context=512,
-            clip=CONFIG['clip_val']
+            model,
+            tokenizer,
+            device=CONFIG["device"],
+            max_context=512,
+            clip=CONFIG["clip_val"],
         )
         print("   ✅ 模型加载成功")
     except Exception as e:
@@ -187,7 +229,7 @@ def run_rolling_system():
         return
 
     optimizer = ParameterOptimizer(predictor, CONFIG)
-    
+
     # 滚动周期配置
     rolling_periods = [
         ("2025.01", "2024-12-01", "2024-12-31", "2025-01-01", "2025-01-31"),
@@ -202,7 +244,7 @@ def run_rolling_system():
     ]
 
     # === 初始化全局容器 ===
-    all_metrics_buffer = [] 
+    all_metrics_buffer = []
     global_pred_buffers = {name: [] for name in INDICES.keys()}
 
     # === 🔵 缓存加载逻辑 ===
@@ -210,7 +252,7 @@ def run_rolling_system():
     if rank == 0:
         if os.path.exists(PARAMS_CACHE_FILE):
             try:
-                with open(PARAMS_CACHE_FILE, 'r') as f:
+                with open(PARAMS_CACHE_FILE, "r") as f:
                     param_cache = json.load(f)
                 print(f"📦 [Cache] 已加载参数缓存文件: {PARAMS_CACHE_FILE}")
             except Exception as e:
@@ -218,25 +260,37 @@ def run_rolling_system():
 
     # 3. 滚动执行
     print("\n[3/4] 开始滚动推理...")
-    
+
     for p_name, val_start, val_end, test_start, test_end in rolling_periods:
         if rank == 0:
             print(f"\n📅 周期: {p_name}")
-        
+
         val_start_dt = pd.to_datetime(val_start)
         val_end_dt = pd.to_datetime(val_end)
-        
+
         val_data_slice = {}
-        max_lb = max(PARAM_SEARCH_SPACE['lookback'])
-        history_buffer = pd.Timedelta(days=max_lb * 2) 
-        
+        max_lb = max(PARAM_SEARCH_SPACE["lookback"])
+        history_buffer = pd.Timedelta(days=max_lb * 2)
+
         for name, symbol in INDICES.items():
-            df = all_data[all_data['代码'] == symbol].copy()
-            mask = (df["时间"] >= (val_start_dt - history_buffer)) & (df["时间"] <= val_end_dt)
-            slice_df = df[mask].rename(columns={
-                "时间": "date", "开盘价(元)": "open", "最高价(元)": "high", 
-                "最低价(元)": "low", "收盘价(元)": "close", "成交量(万股)": "volume"
-            }).reset_index(drop=True)
+            df = all_data[all_data["代码"] == symbol].copy()
+            mask = (df["时间"] >= (val_start_dt - history_buffer)) & (
+                df["时间"] <= val_end_dt
+            )
+            slice_df = (
+                df[mask]
+                .rename(
+                    columns={
+                        "时间": "date",
+                        "开盘价(元)": "open",
+                        "最高价(元)": "high",
+                        "最低价(元)": "low",
+                        "收盘价(元)": "close",
+                        "成交量(万股)": "volume",
+                    }
+                )
+                .reset_index(drop=True)
+            )
             if not slice_df.empty:
                 val_data_slice[name] = slice_df
 
@@ -245,10 +299,12 @@ def run_rolling_system():
         if rank == 0 and p_name in param_cache:
             use_cache = True
 
-        decision_tensor = torch.tensor([1 if use_cache else 0], dtype=torch.int, device=CONFIG['device'])
+        decision_tensor = torch.tensor(
+            [1 if use_cache else 0], dtype=torch.int, device=CONFIG["device"]
+        )
         if world_size > 1:
             dist.broadcast(decision_tensor, src=0)
-        should_use_cache = (decision_tensor.item() == 1)
+        should_use_cache = decision_tensor.item() == 1
 
         best_params_map = {}
 
@@ -257,11 +313,13 @@ def run_rolling_system():
                 print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
                 best_params_map = param_cache[p_name]
         else:
-            best_params_map = optimizer.grid_search(val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt)
+            best_params_map = optimizer.grid_search(
+                val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt
+            )
             if rank == 0:
                 param_cache[p_name] = best_params_map
                 try:
-                    with open(PARAMS_CACHE_FILE, 'w') as f:
+                    with open(PARAMS_CACHE_FILE, "w") as f:
                         json.dump(param_cache, f, indent=2, default=str)
                     print(f"   💾 [Cache] 参数已更新并保存")
                 except Exception as e:
@@ -279,7 +337,12 @@ def run_rolling_system():
 
         # --- B. 样本外测试（多卡推理，搜参结束后统一进入） ---
         for name, symbol in INDICES.items():
-            my_params = best_params_map.get(name, best_params_map.get(next(iter(best_params_map)) if best_params_map else name, {}))
+            my_params = best_params_map.get(
+                name,
+                best_params_map.get(
+                    next(iter(best_params_map)) if best_params_map else name, {}
+                ),
+            )
             if not my_params:
                 if rank == 0:
                     print(f"   ⚠️ {name} 无可用参数，跳过")
@@ -304,7 +367,10 @@ def run_rolling_system():
             )
 
             if rank == 0:
-                print(f"     📝 [Inference] {name} 完成 ({len(p_results.get(name, [])) if p_results else 0} days)", flush=True)
+                print(
+                    f"     📝 [Inference] {name} 完成 ({len(p_results.get(name, [])) if p_results else 0} days)",
+                    flush=True,
+                )
 
                 for m in p_metrics:
                     m["period"] = p_name
@@ -318,42 +384,51 @@ def run_rolling_system():
     # 4. 汇总、拼接与全局指标计算 (Rank 0 only)
     if rank == 0:
         print("\n[4/4] 汇总全样本数据并计算全局指标...")
-        
+
         final_full_predictions = {}
         global_metrics_list = []
-        
+
         for name, df_list in global_pred_buffers.items():
             # 拼接全样本预测
-            full_df = pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
+            full_df = (
+                pd.concat(df_list, axis=0).sort_values("date").reset_index(drop=True)
+            )
             final_full_predictions[name] = full_df
-            
+
             # 保存完整预测 CSV
             save_path = os.path.join(OUTPUT_DIR, f"predictions_rolling_{name}.csv")
             full_df.to_csv(save_path, index=False)
-            
+
             # 【关键修改】直接在拼接后的全样本上调用 calculate_metrics
             # 这将计算包含跨月价格趋势的 Global IC，对齐报告 0.856 口径
             from testutils.metrics_utils import calculate_metrics
+
             idx_global_metrics = calculate_metrics(full_df)
             idx_global_metrics["Index"] = name
             global_metrics_list.append(idx_global_metrics)
-            
+
             print(f"   ✅ {name}: 全样本 Global IC 汇总完成")
 
         # 保存并展示全局指标
         if global_metrics_list:
             df_global = pd.concat(global_metrics_list, ignore_index=True)
-            
+
             # 专门保存一份对齐报告口径的汇总文件
             aggregate_and_save_metrics([df_global], OUTPUT_DIR, "rolling_global_final")
-            
+
             print("\n🏆 [报告口径汇总] 全样本绝对价格相关性 (Global Price Corr):")
             # 筛选 T+5 的结果直接与报告 0.856 进行对比
-            t5_results = df_global[df_global['horizon'] == 'T+5']
-            print(t5_results[['Index', 'horizon', 'price_corr', 'price_mae']])
-        
+            t5_results = df_global[df_global["horizon"] == "T+5"]
+            print(t5_results[["Index", "horizon", "price_corr", "price_mae"]])
+
         # 绘图逻辑保持不变
-        plot_all_results(final_full_predictions, OUTPUT_DIR, "rolling_final", CONFIG, combine_subplots=True)
+        plot_all_results(
+            final_full_predictions,
+            OUTPUT_DIR,
+            "rolling_final",
+            CONFIG,
+            combine_subplots=True,
+        )
 
         # 清理批次推理生成的临时预测文件
         temp_removed = 0
@@ -367,8 +442,9 @@ def run_rolling_system():
                     print(f"   ⚠️ 临时文件删除失败: {temp_path} ({e})")
         if temp_removed:
             print(f"   🧹 已清理 {temp_removed} 个临时预测文件")
-        
+
         print(f"\n✅ 全部完成! 输出目录: {OUTPUT_DIR}")
+
 
 if __name__ == "__main__":
     run_rolling_system()
