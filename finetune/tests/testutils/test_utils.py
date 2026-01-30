@@ -10,11 +10,7 @@ import torch
 import torch.distributed as dist
 import matplotlib.pyplot as plt
 import argparse
-from tqdm import tqdm
 import warnings
-
-from model.kronos import KronosPredictor
-
 
 def init_distributed_mode():
     """初始化分布式推理/训练环境"""
@@ -158,7 +154,7 @@ def parse_test_args(description):
 
 
 def run_distributed_inference(
-    predictor: KronosPredictor,
+    predictor,
     all_data,
     indices_dict,
     config,
