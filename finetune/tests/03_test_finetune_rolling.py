@@ -147,51 +147,75 @@ class ParameterOptimizer:
         results = {}
 
         for name, df in val_data.items():
+            # 1. 准备验证区间
             date_mask = (df["date"] >= val_start) & (df["date"] <= val_end)
             all_indices = df[date_mask].index.tolist()
             valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len) and i >= lookback]
 
-            daily_sequence_corrs = []
-            pred_t5_prices = []
-            actual_t5_prices = []
-            pred_t5_returns = []
-            actual_t5_returns = []
-
+            strategy_daily_returns = []
+            holding_timer = 0
+            
+            # 2. 逐日模拟择时策略
             for idx in valid_indices:
-                # 无论在哪张卡上跑，只要 idx 一样，随机数序列就必须一样
-                # 使用 base_seed + idx 确保每天的随机性独立但可复现
+                # 保持随机性可复现
                 base_seed = self.config.get("seed", 100)
                 torch.manual_seed(base_seed + idx)
                 if torch.cuda.is_available():
                     torch.cuda.manual_seed(base_seed + idx)
 
                 current_close = df.iloc[idx]["close"]
-                input_df = df.iloc[idx - lookback + 1 : idx + 1]
-                future_df = df.iloc[idx + 1 : idx + 1 + pred_len]
                 
-                pred_df = self.predictor.predict(
-                    df=input_df, x_timestamp=input_df["date"],
-                    y_timestamp=future_df["date"],
-                    pred_len=pred_len, T=params["T"], top_p=params["top_p"],
-                    sample_count=10, verbose=False,
-                )
+                # 计算当日市场收益率 (T+1)
+                # 逻辑：在 T 日收盘看到信号，T+1 日获取收益
+                market_return_t_plus_1 = df.iloc[idx + 1]["close"] / current_close - 1
+                
+                # 只有在空仓监控时才读取预测信号 (与你的择时脚本逻辑完全对齐)
+                if holding_timer == 0:
+                    input_df = df.iloc[idx - lookback + 1 : idx + 1]
+                    future_df = df.iloc[idx + 1 : idx + 1 + pred_len]
+                    
+                    pred_df = self.predictor.predict(
+                        df=input_df, x_timestamp=input_df["date"],
+                        y_timestamp=future_df["date"],
+                        pred_len=pred_len, T=params["T"], top_p=params["top_p"],
+                        sample_count=10, verbose=False,
+                    )
 
-                actual_seq = np.insert(future_df["close"].values, 0, current_close)
-                pred_seq = np.insert(pred_df["close"].values, 0, current_close)
-                seq_corr, _ = spearmanr(actual_seq, pred_seq)
-                daily_sequence_corrs.append(seq_corr)
+                    # 计算预测 T+5 收益率
+                    p_price_t5 = pred_df.iloc[pred_len - 1]["close"]
+                    p_ret_t5 = p_price_t5 / current_close - 1
+                    
+                    # 触发阈值判定
+                    if p_ret_t5 > 0.005:
+                        holding_timer = 5
 
-                p_price_t5 = pred_df.iloc[pred_len - 1]["close"]
-                r_price_t5 = future_df.iloc[pred_len - 1]["close"]
-                p_ret_t5 = p_price_t5 / current_close - 1
-                r_ret_t5 = r_price_t5 / current_close - 1
-                pred_t5_prices.append(p_price_t5)
-                actual_t5_prices.append(r_price_t5)
-                pred_t5_returns.append(p_ret_t5)
-                actual_t5_returns.append(r_ret_t5)
+                # 3. 记录策略日收益
+                if holding_timer > 0:
+                    strategy_daily_returns.append(market_return_t_plus_1)
+                    holding_timer -= 1
+                else:
+                    strategy_daily_returns.append(0.0)
 
-            target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
-            results[name] = target_ic
+            # 4. 计算夏普率指标
+            ret_array = np.array(strategy_daily_returns)
+            
+            # 如果该参数组合在验证期从未开仓，赋予极低分数
+            if np.sum(ret_array != 0) == 0:
+                results[name] = -999.0
+                continue
+
+            # 计算年化夏普率公式
+            # Sharpe = (均值 / 标准差) * sqrt(252)
+            avg_ret = np.mean(ret_array)
+            std_ret = np.std(ret_array)
+            
+            # 避免除以 0
+            if std_ret > 0:
+                sharpe_ratio = (avg_ret / std_ret) * np.sqrt(252)
+            else:
+                sharpe_ratio = -999.0
+            
+            results[name] = sharpe_ratio
 
         return results
 
