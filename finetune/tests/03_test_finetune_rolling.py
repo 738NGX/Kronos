@@ -185,8 +185,7 @@ class ParameterOptimizer:
                 actual_t5_returns.append(r_ret_t5)
 
             target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
-            mean_path_ic = np.mean(daily_sequence_corrs)
-            results[name] = 0.8 * target_ic + 0.2 * mean_path_ic
+            results[name] = target_ic
 
         return results
 
