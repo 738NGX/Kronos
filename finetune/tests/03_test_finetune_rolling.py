@@ -152,6 +152,8 @@ class ParameterOptimizer:
             valid_indices = [i for i in all_indices if i <= (len(df) - 1 - pred_len) and i >= lookback]
 
             daily_sequence_corrs = []
+            pred_t5_prices = []
+            actual_t5_prices = []
             pred_t5_returns = []
             actual_t5_returns = []
 
@@ -171,7 +173,7 @@ class ParameterOptimizer:
                     df=input_df, x_timestamp=input_df["date"],
                     y_timestamp=future_df["date"],
                     pred_len=pred_len, T=params["T"], top_p=params["top_p"],
-                    sample_count=1, verbose=False,
+                    sample_count=5, verbose=False,
                 )
 
                 actual_seq = np.insert(future_df["close"].values, 0, current_close)
@@ -179,12 +181,16 @@ class ParameterOptimizer:
                 seq_corr, _ = spearmanr(actual_seq, pred_seq)
                 daily_sequence_corrs.append(seq_corr)
 
-                p_ret_t5 = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
-                r_ret_t5 = future_df.iloc[pred_len - 1]["close"] / current_close - 1
+                p_price_t5 = pred_df.iloc[pred_len - 1]["close"]
+                r_price_t5 = future_df.iloc[pred_len - 1]["close"]
+                p_ret_t5 = p_price_t5 / current_close - 1
+                r_ret_t5 = r_price_t5 / current_close - 1
+                pred_t5_prices.append(p_price_t5)
+                actual_t5_prices.append(r_price_t5)
                 pred_t5_returns.append(p_ret_t5)
                 actual_t5_returns.append(r_ret_t5)
 
-            target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
+            target_ic, _ = spearmanr(pred_t5_prices, actual_t5_prices)
             results[name] = target_ic
 
         return results
