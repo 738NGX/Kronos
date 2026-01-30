@@ -128,7 +128,7 @@ class ParameterOptimizer:
                         final_best_ic[name] = gpu_ics[name]
                         final_best_params[name] = gpu_params[name]
         print("\n   🏆 [全局汇总] 各指数最优参数:")
-        default_params = {k: v[0] for k, v in current_space.items()}
+        default_params = {k: v[0] for k, v in param_space.items()}
         for name in val_data.keys():
             if final_best_params[name] is None:
                 final_best_params[name] = default_params
