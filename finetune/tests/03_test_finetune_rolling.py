@@ -93,7 +93,7 @@ class ParameterOptimizer:
                         pred_len=self.config["pred_len"],
                         T=t,
                         top_p=tp,
-                        sample_count=10,
+                        sample_count=30,
                         verbose=False
                     )
 
