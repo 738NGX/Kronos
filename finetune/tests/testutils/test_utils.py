@@ -13,6 +13,8 @@ import argparse
 from tqdm import tqdm
 import warnings
 
+from model.kronos import KronosPredictor
+
 
 def init_distributed_mode():
     """初始化分布式推理/训练环境"""
@@ -156,7 +158,7 @@ def parse_test_args(description):
 
 
 def run_distributed_inference(
-    predictor,
+    predictor: KronosPredictor,
     all_data,
     indices_dict,
     config,
@@ -166,7 +168,6 @@ def run_distributed_inference(
     world_size: int = 1,
 ):
     from testutils.data_utils import load_and_prepare_index_data
-    from testutils.metrics_utils import calculate_metrics
 
     if rank == 0:
         print("📥 加载所有指数数据...")

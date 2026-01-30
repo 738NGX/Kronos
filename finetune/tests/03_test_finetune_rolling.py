@@ -173,7 +173,7 @@ class ParameterOptimizer:
                     df=input_df, x_timestamp=input_df["date"],
                     y_timestamp=future_df["date"],
                     pred_len=pred_len, T=params["T"], top_p=params["top_p"],
-                    sample_count=5, verbose=False,
+                    sample_count=10, verbose=False,
                 )
 
                 actual_seq = np.insert(future_df["close"].values, 0, current_close)
@@ -190,7 +190,7 @@ class ParameterOptimizer:
                 pred_t5_returns.append(p_ret_t5)
                 actual_t5_returns.append(r_ret_t5)
 
-            target_ic, _ = spearmanr(pred_t5_prices, actual_t5_prices)
+            target_ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
             results[name] = target_ic
 
         return results

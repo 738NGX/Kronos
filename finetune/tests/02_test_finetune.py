@@ -45,7 +45,7 @@ def run_inference(combine_plots=True):
     predictor = KronosPredictor(
         model, tokenizer, 
         device=CONFIG['device'], 
-        max_context=CONFIG['lookback'],
+        max_context=512,
         clip=CONFIG['clip_val']
     )
     
