@@ -53,11 +53,11 @@ MODEL_CONFIG = {
         "中证500": CSI500_MODEL_PATH,
         "中证1000": CSI2000_MODEL_PATH,
         "中证2000": CSI2000_MODEL_PATH,
-        "中证红利": CSI500_TOKENIZER_PATH,
+        "中证红利": CSI500_MODEL_PATH,
         "default": CSI1000_MODEL_PATH,
     },
     "tokenizer_path": {
-        "上证50": CSI300_MODEL_PATH,
+        "上证50": CSI300_TOKENIZER_PATH,
         "沪深300": CSI300_TOKENIZER_PATH,
         "中证500": CSI500_TOKENIZER_PATH,
         "中证1000": CSI2000_TOKENIZER_PATH,

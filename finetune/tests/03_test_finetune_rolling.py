@@ -193,11 +193,14 @@ def run_rolling_system():
 
     # 2. 加载模型（支持每个指数使用不同的模型）
     print("\n[2/4] 初始化模型...")
-    tokenizer = KronosTokenizer.from_pretrained(CONFIG["tokenizer_path"])
-    
+
     # 存储每个指数的预测器和优化器
     predictors = {}
     optimizers = {}
+
+    # 缓存（按路径复用）
+    tokenizer_cache = {}
+    model_cache = {}
     
     for index in INDICES.keys():
         try:
@@ -210,7 +213,26 @@ def run_rolling_system():
             if rank == 0:
                 print(f"   加载 {index} 的模型: {model_path}")
             
-            model = Kronos.from_pretrained(model_path)
+            # 获取每个指数对应的 tokenizer 路径
+            if isinstance(CONFIG["tokenizer_path"], dict):
+                tokenizer_path = CONFIG["tokenizer_path"].get(
+                    index,
+                    CONFIG["tokenizer_path"].get(
+                        "default", list(CONFIG["tokenizer_path"].values())[0]
+                    ),
+                )
+            else:
+                tokenizer_path = CONFIG["tokenizer_path"]
+
+            if tokenizer_path not in tokenizer_cache:
+                tokenizer_cache[tokenizer_path] = KronosTokenizer.from_pretrained(
+                    tokenizer_path
+                )
+            tokenizer = tokenizer_cache[tokenizer_path]
+
+            if model_path not in model_cache:
+                model_cache[model_path] = Kronos.from_pretrained(model_path)
+            model = model_cache[model_path]
             predictor = KronosPredictor(
                 model,
                 tokenizer,
