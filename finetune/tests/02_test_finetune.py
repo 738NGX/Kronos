@@ -38,31 +38,38 @@ def run_inference(combine_plots=True):
     # 1. 加载微调后的模型 (Safetensors)
     if rank == 0:
         print(f"🚀 Loading Finetuned Kronos from {CONFIG['model_path']}...")
-    tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
-    model = Kronos.from_pretrained(CONFIG['model_path'])
     
-    # 初始化预测器
-    predictor = KronosPredictor(
-        model, tokenizer, 
-        device=CONFIG['device'], 
-        max_context=512,
-        clip=CONFIG['clip_val']
-    )
+    all_results = {}
     
-    all_results = run_distributed_inference(
-        predictor=predictor,
-        all_data=all_data,
-        indices_dict=INDICES,
-        config=CONFIG,
-        output_dir=OUTPUT_DIR,
-        model_name="finetuned",
-        rank=rank,
-        world_size=world_size,
-    )
+    for index in INDICES:
+        tokenizer = KronosTokenizer.from_pretrained(CONFIG['tokenizer_path'])
+        model_path = CONFIG['model_path'].get(index, CONFIG['model_path'])  # 获取每个指数的模型路径
+        model = Kronos.from_pretrained(model_path)
+        
+        # 初始化预测器
+        predictor = KronosPredictor(
+            model, tokenizer, 
+            device=CONFIG['device'], 
+            max_context=512,
+            clip=CONFIG['clip_val']
+        )
+        
+        results = run_distributed_inference(
+            predictor=predictor,
+            all_data=all_data,
+            indices_dict={index: INDICES[index]},  # 只传递当前指数
+            config=CONFIG,
+            output_dir=OUTPUT_DIR,
+            model_name=index,
+            rank=rank,
+            world_size=world_size,
+        )
+        all_results[index] = results  # 保存每个指数的结果
 
     if rank == 0:
-        aggregate_and_save_metrics(all_results, OUTPUT_DIR, "finetuned")
-        plot_all_results(all_results, OUTPUT_DIR, "finetuned", CONFIG, combine_plots)
+        for index, results in all_results.items():
+            aggregate_and_save_metrics(results, OUTPUT_DIR, index)
+            plot_all_results(results, OUTPUT_DIR, index, CONFIG, combine_plots)
 
 if __name__ == "__main__":
     args = parse_test_args('Test Kronos Finetuned Model')

@@ -191,24 +191,41 @@ def run_rolling_system():
     all_data = read_test_data()
     all_data["时间"] = pd.to_datetime(all_data["时间"])
 
-    # 2. 加载模型
+    # 2. 加载模型（支持每个指数使用不同的模型）
     print("\n[2/4] 初始化模型...")
-    try:
-        tokenizer = KronosTokenizer.from_pretrained(CONFIG["tokenizer_path"])
-        model = Kronos.from_pretrained(CONFIG["model_path"])
-        predictor = KronosPredictor(
-            model,
-            tokenizer,
-            device=CONFIG["device"],
-            max_context=512,
-            clip=CONFIG["clip_val"],
-        )
-        print("   ✅ 模型加载成功")
-    except Exception as e:
-        print(f"   ❌ 模型加载失败: {e}")
-        return
-
-    optimizer = ParameterOptimizer(predictor, CONFIG)
+    tokenizer = KronosTokenizer.from_pretrained(CONFIG["tokenizer_path"])
+    
+    # 存储每个指数的预测器和优化器
+    predictors = {}
+    optimizers = {}
+    
+    for index in INDICES.keys():
+        try:
+            # 获取每个指数对应的模型路径
+            if isinstance(CONFIG['model_path'], dict):
+                model_path = CONFIG['model_path'].get(index, CONFIG['model_path'].get('default', list(CONFIG['model_path'].values())[0]))
+            else:
+                model_path = CONFIG['model_path']  # 如果是字符串，所有指数使用同一个模型
+            
+            if rank == 0:
+                print(f"   加载 {index} 的模型: {model_path}")
+            
+            model = Kronos.from_pretrained(model_path)
+            predictor = KronosPredictor(
+                model,
+                tokenizer,
+                device=CONFIG["device"],
+                max_context=512,
+                clip=CONFIG["clip_val"],
+            )
+            predictors[index] = predictor
+            optimizers[index] = ParameterOptimizer(predictor, CONFIG)
+            
+            if rank == 0:
+                print(f"   ✅ {index} 模型加载成功")
+        except Exception as e:
+            print(f"   ❌ {index} 模型加载失败: {e}")
+            return
 
     # 动态生成滚动周期配置（基于 CONFIG 中的 test_start 和 test_end）
     from dateutil.relativedelta import relativedelta
@@ -312,9 +329,14 @@ def run_rolling_system():
                 print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
                 best_params_map = param_cache[p_name]
         else:
-            best_params_map = optimizer.grid_search(
-                val_data_slice, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt
-            )
+            # 为每个指数使用对应的优化器进行参数搜索
+            for index in INDICES.keys():
+                if index in optimizers and index in val_data_slice:
+                    index_params = optimizers[index].grid_search(
+                        {index: val_data_slice[index]}, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt
+                    )
+                    best_params_map.update(index_params)
+            
             if rank == 0:
                 param_cache[p_name] = best_params_map
                 try:
@@ -354,8 +376,11 @@ def run_rolling_system():
 
             single_index_dict = {name: symbol}
 
+            # 使用该指数对应的预测器
+            index_predictor = predictors.get(name, list(predictors.values())[0])
+            
             p_results = run_distributed_inference(
-                predictor=predictor,
+                predictor=index_predictor,
                 all_data=all_data,
                 indices_dict=single_index_dict,
                 config=idx_config,
