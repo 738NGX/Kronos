@@ -75,7 +75,7 @@ class QlibDataPreprocessor:
             loader_all = QlibDataLoader(config=data_fields_qlib)
             df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
             
-            loader_filter = QlibDataLoader(config=['']) # Config doesn't matter, we just need the index
+            loader_filter = QlibDataLoader(config=['$close']) # Config doesn't matter, we just need the index
             df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
             df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
             
@@ -122,7 +122,7 @@ class QlibDataPreprocessor:
                 loader_all = QlibDataLoader(config=data_fields_qlib)
                 df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
                 
-                loader_filter = QlibDataLoader(config=[''])  # Config doesn't matter, we just need the index
+                loader_filter = QlibDataLoader(config=['$close'])  # Config doesn't matter, we just need the index
                 df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
                 df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
                 
@@ -142,7 +142,7 @@ class QlibDataPreprocessor:
                     loader_all = QlibDataLoader(config=data_fields_qlib)
                     df_all = loader_all.load('csiall', phase2_start, real_end_time)
                     
-                    loader_filter = QlibDataLoader(config=[''])
+                    loader_filter = QlibDataLoader(config=['$close'])
                     df_300 = loader_filter.load('csi300', phase2_start, real_end_time)
                     df_500 = loader_filter.load('csi500', phase2_start, real_end_time)
                     
@@ -170,7 +170,7 @@ class QlibDataPreprocessor:
                 loader_all = QlibDataLoader(config=data_fields_qlib)
                 df_all = loader_all.load('csiall', real_start_time, real_end_time)
                 
-                loader_filter = QlibDataLoader(config=[''])
+                loader_filter = QlibDataLoader(config=['$close'])
                 df_300 = loader_filter.load('csi300', real_start_time, real_end_time)
                 df_500 = loader_filter.load('csi500', real_start_time, real_end_time)
                 
