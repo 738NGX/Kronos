@@ -152,7 +152,9 @@ class Config:
     def _set_benchmark(self, instrument):
         dt_benchmark = {
             'csi800': "SH000906",
+            'csi500': "SH000905",
             'csi1000': "SH000852",
+            'csi2000': "SH000852",
             'csi300': "SH000300",
         }
         if instrument in dt_benchmark:
