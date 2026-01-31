@@ -48,13 +48,12 @@ class ParameterOptimizer:
         param_space: Dict,
         val_start: pd.Timestamp,
         val_end: pd.Timestamp,
+        disable_rank_split: bool = False,
     ) -> Dict[str, Dict]:
         all_indices_names = list(val_data.keys())
-        my_indices = all_indices_names[rank::world_size]
+        my_indices = all_indices_names if disable_rank_split else all_indices_names[rank::world_size]
         
-        if rank == 0:
-            print(f"\n🔍 [滚动搜参-Batch高性能版] 区间: {val_start.date()} ~ {val_end.date()}")
-            print(f"   策略：全量采样 (Step=1) + 批量并行推理")
+        print(f"\n🔍 [GPU-{rank}] 区间: {val_start.date()} ~ {val_end.date()}")
 
         local_best_score = {name: -2.0 for name in all_indices_names}
         local_best_params = {name: None for name in all_indices_names}
@@ -104,9 +103,8 @@ class ParameterOptimizer:
                         local_best_score[name] = score
                         local_best_params[name] = {"T": t, "top_p": tp, "lookback": lb}
 
-                if rank == 0:
-                    elapsed = time.time() - batch_start
-                    print(f"   🚀 [GPU-{rank}] 指数: {name} | LB={lb} 完成评估 | 耗时: {elapsed:.1f}s")
+                elapsed = time.time() - batch_start
+                print(f"   🚀 [GPU-{rank}] 指数: {name} | LB={lb} 完成评估 | 耗时: {elapsed:.1f}s")
 
         # === 汇总结果 (保持同步) ===
         my_result = (local_best_params, local_best_score)
@@ -351,11 +349,17 @@ def run_rolling_system():
                 print(f"   ⚡ [Cache] 命中缓存，跳过搜索")
                 best_params_map = param_cache[p_name]
         else:
-            # 为每个指数使用对应的优化器进行参数搜索
-            for index in INDICES.keys():
+            # 为每个指数使用对应的优化器进行参数搜索（按 rank 分配指数）
+            all_indices = list(INDICES.keys())
+            my_indices = all_indices[rank::world_size] if world_size > 1 else all_indices
+            for index in my_indices:
                 if index in optimizers and index in val_data_slice:
                     index_params = optimizers[index].grid_search(
-                        {index: val_data_slice[index]}, PARAM_SEARCH_SPACE, val_start_dt, val_end_dt
+                        {index: val_data_slice[index]},
+                        PARAM_SEARCH_SPACE,
+                        val_start_dt,
+                        val_end_dt,
+                        disable_rank_split=True,
                     )
                     best_params_map.update(index_params)
             
