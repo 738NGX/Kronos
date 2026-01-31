@@ -95,7 +95,7 @@ class ParameterOptimizer:
                         pred_len=self.config["pred_len"],
                         T=t,
                         top_p=tp,
-                        sample_count=30,
+                        sample_count=15,
                         verbose=False
                     )
 
@@ -122,7 +122,7 @@ class ParameterOptimizer:
 
         for gpu_params, gpu_scores in all_results_list:
             for name in all_indices_names:
-                if gpu_params[name] is not None:
+                if name in gpu_params and gpu_params[name] is not None:
                     if gpu_scores[name] > final_best_score[name]:
                         final_best_score[name] = gpu_scores[name]
                         final_best_params[name] = gpu_params[name]
