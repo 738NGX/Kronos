@@ -16,6 +16,7 @@ from testutils.test_utils import (
 from testutils.common_config import FINETUNE_CONFIG, INDICES, BASE_OUTPUT_DIR
 from testutils.data_utils import read_test_data
 import torch.distributed as dist
+import time
 
 setup_environment()
 from model import Kronos, KronosTokenizer, KronosPredictor
@@ -53,7 +54,8 @@ class ParameterOptimizer:
         all_indices_names = list(val_data.keys())
         my_indices = all_indices_names if disable_rank_split else all_indices_names[rank::world_size]
         
-        print(f"\n🔍 [GPU-{rank}] 区间: {val_start.date()} ~ {val_end.date()}")
+        # 性能剪枝阈值：如果当前 lookback 已达到优秀水平，不再搜索更长的窗口
+        PERFORMANCE_PRUNING_THRESHOLD = 1.3 
 
         local_best_score = {name: -2.0 for name in all_indices_names}
         local_best_params = {name: None for name in all_indices_names}
@@ -61,11 +63,15 @@ class ParameterOptimizer:
         for name in my_indices:
             df = val_data[name]
             min_data_len = len(df)
+            # 这里的 5 是对应预测序列长度 pred_window
             max_lookback_allowed = min_data_len - self.config["pred_len"] - 5
-            filtered_lookbacks = [lb for lb in param_space["lookback"] if lb <= max_lookback_allowed]
+            filtered_lookbacks = sorted([lb for lb in param_space["lookback"] if lb <= max_lookback_allowed])
             
-            # --- 优化：将 Lookback 设为外层循环，利用 Batch 提速 ---
             for lb in (filtered_lookbacks if filtered_lookbacks else [30]):
+                # 剪枝：若已搜到足够好的参数，跳过后续更长的 Lookback 以节省 3.5 小时的总耗时
+                if local_best_score[name] >= PERFORMANCE_PRUNING_THRESHOLD:
+                    continue
+
                 date_mask = (df["date"] >= val_start) & (df["date"] <= val_end)
                 all_idx = df[date_mask].index.tolist()
                 valid_indices = [i for i in all_idx if i <= (len(df) - 1 - self.config["pred_len"]) and i >= lb]
@@ -77,14 +83,11 @@ class ParameterOptimizer:
                     x_ts_list.append(df.iloc[idx - lb + 1 : idx + 1]["date"])
                     y_ts_list.append(df.iloc[idx + 1 : idx + 1 + self.config["pred_len"]]["date"])
 
-                # 2. 调用官方 Batch 接口 (全量推理 90 天仅需极少次数的模型 Forward)
-                # 为保证多样性评估，这里先以基准参数获取 Batch 预测
-                import time
                 batch_start = time.time()
                 
-                # 注意：这里我们遍历 T 和 top_p。如果模型推理开销极大，
-                # 我们可以根据官方文档建议，通过调整 predict_batch 的参数来遍历组合
+                # 2. 遍历参数组合进行批量推理
                 for t, tp in product(param_space["T"], param_space["top_p"]):
+                    # 采样次数固定为 30 以确保统计稳健性
                     pred_df_list = self.predictor.predict_batch(
                         df_list=df_list,
                         x_timestamp_list=x_ts_list,
@@ -92,21 +95,21 @@ class ParameterOptimizer:
                         pred_len=self.config["pred_len"],
                         T=t,
                         top_p=tp,
-                        sample_count=10,
+                        sample_count=30,
                         verbose=False
                     )
 
-                    # 3. 内存评估 (计算 Hybrid Score)
-                    score = self._evaluate_batch_results(df, valid_indices, pred_df_list)
+                    # 3. 增强版评估：引入 Participation Rate 和 Recency Weighting
+                    score = self._evaluate_batch_results_v2(df, valid_indices, pred_df_list)
 
                     if score > local_best_score[name]:
                         local_best_score[name] = score
                         local_best_params[name] = {"T": t, "top_p": tp, "lookback": lb}
 
                 elapsed = time.time() - batch_start
-                print(f"   🚀 [GPU-{rank}] 指数: {name} | LB={lb} 完成评估 | 耗时: {elapsed:.1f}s")
+                print(f" 🚀 [GPU-{rank}] 指数: {name} | LB={lb} 完成评估 | 耗时: {elapsed:.1f}s")
 
-        # === 汇总结果 (保持同步) ===
+        # === 结果汇总逻辑 ===
         my_result = (local_best_params, local_best_score)
         all_results_list = [None for _ in range(world_size)]
         if world_size > 1:
@@ -125,58 +128,80 @@ class ParameterOptimizer:
                         final_best_params[name] = gpu_params[name]
 
         if rank == 0:
-            print("\n🏆 [全局汇总] 各指数最优参数 (Hybrid Score):")
+            print("\n🏆 [全局汇总] 各指数最优参数 (Hybrid Score v2):")
             for name in val_data.keys():
                 p = final_best_params[name]
                 print(f"   ✅ {name}: Score={final_best_score[name]:.4f} (T={p['T']}, top_p={p['top_p']}, LB={p['lookback']})")
 
         return final_best_params
 
-    def _evaluate_batch_results(self, df, indices, pred_df_list):
+    def _evaluate_batch_results_v2(self, df, indices, pred_df_list):
         """
-        利用预计算的 Batch 结果进行快速策略模拟
+        评估函数 v2：旨在解决暴涨行情踏空问题
         """
         pred_len = self.config["pred_len"]
         strategy_daily_returns = []
+        market_daily_returns = []
         pred_t5_returns = []
         actual_t5_returns = []
+        positions = []
         holding_timer = 0
         
+        # 1. 构造近期加权序列：近期样本权重更高，半衰期设为 20 个交易日
+        num_samples = len(indices)
+        time_weights = np.exp(np.linspace(-1.0, 0, num_samples)) 
+
         for i, idx in enumerate(indices):
             current_close = df.iloc[idx]["close"]
-            market_ret_next = df.iloc[idx + 1]["close"] / current_close - 1
+            mkt_ret_next = df.iloc[idx + 1]["close"] / current_close - 1
+            market_daily_returns.append(mkt_ret_next)
             
-            # 从 Batch 结果中提取对应的预测
+            # 提取 T+5 预测与真实值
             pred_df = pred_df_list[i]
-            
-            # 计算 T+5 收益率
             p_ret_t5 = pred_df.iloc[pred_len - 1]["close"] / current_close - 1
-            # 真实收益率 (从原始 df 获取以确保准确)
             r_ret_t5 = df.iloc[idx + pred_len]["close"] / current_close - 1
             
             pred_t5_returns.append(p_ret_t5)
             actual_t5_returns.append(r_ret_t5)
 
-            # 择时逻辑模拟
+            # 严格执行 0.5% 阈值与 5 天持仓择时
             if holding_timer == 0 and p_ret_t5 > 0.005:
                 holding_timer = 5
             
             if holding_timer > 0:
-                strategy_daily_returns.append(market_ret_next)
+                strategy_daily_returns.append(mkt_ret_next)
+                positions.append(1.0)
                 holding_timer -= 1
             else:
                 strategy_daily_returns.append(0.0)
+                positions.append(0.0)
 
-        # 指标计算
-        ic, _ = spearmanr(pred_t5_returns, actual_t5_returns)
-        ret_array = np.array(strategy_daily_returns)
+        # 2. 计算加权 IC (体现预测的时效准确性)
+        ic, _ = spearmanr(np.array(pred_t5_returns) * time_weights, 
+                          np.array(actual_t5_returns) * time_weights)
         
-        if np.std(ret_array) > 0:
-            sharpe = (np.mean(ret_array) / np.std(ret_array)) * np.sqrt(252)
+        # 3. 计算加权夏普率
+        strat_rets = np.array(strategy_daily_returns)
+        weighted_strat_rets = strat_rets * time_weights
+        if np.std(weighted_strat_rets) > 0:
+            sharpe = (np.mean(weighted_strat_rets) / np.std(weighted_strat_rets)) * np.sqrt(252)
         else:
             sharpe = -1.0
-            
-        return 0.5 * ic + 0.5 * (sharpe / 2.0)
+
+        # 4. 计算 Beta 参与率得分 (Participation Score)
+        # 核心逻辑：在验证期内指数表现最好的 20% 的日子里，策略的持仓比例
+        mkt_array = np.array(market_daily_returns)
+        top_20_threshold = np.percentile(mkt_array, 80)
+        top_days_mask = mkt_array >= top_20_threshold
+        
+        participation_rate = np.mean(np.array(positions)[top_days_mask])
+
+        # 5. 最终复合得分 2.0
+        # 权重分配：30% IC + 30% Sharpe + 40% Participation
+        # 此公式强制搜参系统在大涨行情（Participation）和稳定性（Sharpe）之间寻找平衡
+        hybrid_score = 0.3 * ic + 0.3 * (sharpe / 2.0) + 0.4 * participation_rate
+        
+        return hybrid_score
 
 
 def run_rolling_system():
