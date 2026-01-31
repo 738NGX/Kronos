@@ -3,7 +3,6 @@ import random
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-from config import Config
 
 
 class QlibDataset(Dataset):
@@ -20,32 +19,39 @@ class QlibDataset(Dataset):
         ValueError: If `data_type` is not 'train' or 'val'.
     """
 
-    def __init__(self, data_type: str = 'train'):
-        self.config = Config()
+    def __init__(self, data_type: str = 'train', config = None):
+        self.config = config
         if data_type not in ['train', 'val']:
             raise ValueError("data_type must be 'train' or 'val'")
         self.data_type = data_type
 
+        def get_config_value(key: str, default=None):
+            if isinstance(self.config, dict):
+                return self.config.get(key, default)
+            return getattr(self.config, key, default)
+
+        self._get_config_value = get_config_value
+
         # Use a dedicated random number generator for sampling to avoid
         # interfering with other random processes (e.g., in model initialization).
-        self.py_rng = random.Random(self.config.seed)
+        self.py_rng = random.Random(self._get_config_value('seed', 100))
 
         # Set paths and number of samples based on the data type.
         if data_type == 'train':
-            self.data_path = f"{self.config.dataset_path}/train_data.pkl"
-            self.n_samples = self.config.n_train_iter
+            self.data_path = f"{self._get_config_value('dataset_path')}/train_data.pkl"
+            self.n_samples = self._get_config_value('n_train_iter')
         else:
-            self.data_path = f"{self.config.dataset_path}/val_data.pkl"
-            self.n_samples = self.config.n_val_iter
+            self.data_path = f"{self._get_config_value('dataset_path')}/val_data.pkl"
+            self.n_samples = self._get_config_value('n_val_iter')
 
         with open(self.data_path, 'rb') as f:
             self.data = pickle.load(f)
 
-        self.window = self.config.lookback_window + self.config.predict_window + 1
+        self.window = self._get_config_value('lookback_window') + self._get_config_value('predict_window') + 1
 
         self.symbols = list(self.data.keys())
-        self.feature_list = self.config.feature_list
-        self.time_feature_list = self.config.time_feature_list
+        self.feature_list = self._get_config_value('feature_list')
+        self.time_feature_list = self._get_config_value('time_feature_list')
 
         # Pre-compute all possible (symbol, start_index) pairs.
         self.indices = []
@@ -82,7 +88,7 @@ class QlibDataset(Dataset):
         Args:
             epoch (int): The current epoch number.
         """
-        epoch_seed = self.config.seed + epoch
+        epoch_seed = self._get_config_value('seed', 100) + epoch
         self.py_rng.seed(epoch_seed)
 
     def __len__(self) -> int:
@@ -121,7 +127,8 @@ class QlibDataset(Dataset):
         # Perform instance-level normalization.
         x_mean, x_std = np.mean(x, axis=0), np.std(x, axis=0)
         x = (x - x_mean) / (x_std + 1e-5)
-        x = np.clip(x, -self.config.clip, self.config.clip)
+        clip_value = self._get_config_value('clip', 5.0)
+        x = np.clip(x, -clip_value, clip_value)
 
         # Convert to PyTorch tensors.
         x_tensor = torch.from_numpy(x)
@@ -132,14 +139,7 @@ class QlibDataset(Dataset):
 
 if __name__ == '__main__':
     # Example usage and verification.
+    # Note: This requires a valid config file to be passed when using QlibDataset
     print("Creating training dataset instance...")
-    train_dataset = QlibDataset(data_type='train')
-
-    print(f"Dataset length: {len(train_dataset)}")
-
-    if len(train_dataset) > 0:
-        try_x, try_x_stamp = train_dataset[100]  # Index 100 is ignored.
-        print(f"Sample feature shape: {try_x.shape}")
-        print(f"Sample time feature shape: {try_x_stamp.shape}")
-    else:
-        print("Dataset is empty.")
+    print("Error: Please pass a config object when creating QlibDataset.")
+    print("Example: QlibDataset(data_type='train', config=config_dict)")

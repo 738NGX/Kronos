@@ -42,8 +42,8 @@ def create_dataloaders(config: dict, rank: int, world_size: int):
         tuple: A tuple containing (train_loader, val_loader, train_dataset, valid_dataset).
     """
     print(f"[Rank {rank}] Creating distributed dataloaders...")
-    train_dataset = QlibDataset('train')
-    valid_dataset = QlibDataset('val')
+    train_dataset = QlibDataset('train', config=config)
+    valid_dataset = QlibDataset('val', config=config)
     print(f"[Rank {rank}] Train dataset size: {len(train_dataset)}, Validation dataset size: {len(valid_dataset)}")
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
@@ -275,9 +275,12 @@ def main(config: dict):
 
 
 if __name__ == '__main__':
-    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_tokenizer.py
+    # Usage: torchrun --standalone --nproc_per_node=NUM_GPUS train_tokenizer.py --config path/to/config.yaml
     if "WORLD_SIZE" not in os.environ:
         raise RuntimeError("This script must be launched with `torchrun`.")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
+    args = parser.parse_args()
 
-    config_instance = Config()
+    config_instance = Config(args.config)
     main(config_instance.__dict__)

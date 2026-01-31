@@ -1,5 +1,8 @@
 import os
 import pickle
+import argparse
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -12,8 +15,8 @@ class QlibDataPreprocessor:
     不再硬编码任何路径，所有挂载点均从 self.config 获取。
     """
 
-    def __init__(self):
-        self.config = Config()
+    def __init__(self, config_path: str):
+        self.config = Config(config_path)
         # 内部映射 Tushare 的 Data 轴索引（OCHL + volume/amount + Adj + Turnover + MV）
         self.sec_map = {'open': 0, 'high': 1, 'low': 2, 'close': 3, 'volume': 7, 'amount': 8}
         self.bas_map = {'adj_factor': 1, 'turnover': 4, 'total_mv': 11}
@@ -145,7 +148,12 @@ class QlibDataPreprocessor:
             print(f"数据集已保存: {save_path}")
 
 if __name__ == '__main__':
-    preprocessor = QlibDataPreprocessor()
+    # Usage: python tushare_data_preprocess.py --config path/to/config.yaml
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
+    args = parser.parse_args()
+
+    preprocessor = QlibDataPreprocessor(config_path=args.config)
     preprocessor.initialize_qlib()
     preprocessor.load_qlib_data()
     preprocessor.prepare_dataset()

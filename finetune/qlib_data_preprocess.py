@@ -1,5 +1,6 @@
 import os
 import pickle
+import argparse
 import numpy as np
 import pandas as pd
 import qlib
@@ -16,9 +17,9 @@ class QlibDataPreprocessor:
     A class to handle the loading, processing, and splitting of Qlib financial data.
     """
 
-    def __init__(self):
+    def __init__(self, config_path: str):
         """Initializes the preprocessor with configuration and data fields."""
-        self.config = Config()
+        self.config = Config(config_path)
         self.data_fields = ['open', 'close', 'high', 'low', 'volume', 'vwap']
         self.data = {}  # A dictionary to store processed data for each symbol.
 
@@ -65,22 +66,18 @@ class QlibDataPreprocessor:
             print("⚠️ Detected request for CSI1000 prior to 2014.")
             print("   -> Activating Hybrid Mode: splicing 'Proxy (Market-300-500)' and 'Real CSI1000'.")
 
-            # Define splice points
-            # Phase 1 ends at SPLIT_DATE
-            # Phase 2 starts immediately after
-            phase1_end = min(SPLIT_DATE, real_end_time)
-            
+            # Phase 1 ends exactly at SPLIT_DATE (to ensure clean cutoff)
             # --- Phase 1: Construct Proxy (Start -> 2014-10-31) ---
-            print(f"   [Phase 1] Loading Proxy Data ({real_start_time.date()} to {phase1_end.date()})...")
+            print(f"   [Phase 1] Loading Proxy Data ({real_start_time.date()} to {SPLIT_DATE.date()})...")
             
             # Load Market, 300, and 500
             # Note: We only need indices for 300 and 500 to perform exclusion
             loader_all = QlibDataLoader(config=data_fields_qlib)
-            df_all = loader_all.load('all', real_start_time, phase1_end)
+            df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
             
             loader_filter = QlibDataLoader(config=['$close']) # Config doesn't matter, we just need the index
-            df_300 = loader_filter.load('csi300', real_start_time, phase1_end)
-            df_500 = loader_filter.load('csi500', real_start_time, phase1_end)
+            df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
+            df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
             
             # Perform Set Difference: All - (300 U 500)
             # Utilizing Pandas Index difference for speed
@@ -103,6 +100,80 @@ class QlibDataPreprocessor:
             
             # Sort to ensure time order (crucial for time-series)
             data_df = data_df.sort_index()
+
+        elif self.config.instrument == 'csi2000':
+            print("⚠️ Detected request for CSI2000.")
+            print("   -> Activating Hybrid Mode: splicing 'all - (csi300 U csi500)' and 'csiall - (csi300 U csi500)'.")
+            
+            # Define splice point: earliest date in csiall
+            SPLIT_DATE = pd.Timestamp("2011-08-31")
+            
+            data_df = None
+            
+            # Trigger Condition: start time is before csiall official release
+            if real_start_time < SPLIT_DATE:
+                # Phase 1 ends exactly at SPLIT_DATE (to ensure clean cutoff)
+                # --- Phase 1: Construct Synthetic CSI2000 using 'all' (Start -> 2011-08-31) ---
+                print(f"   [Phase 1] Loading Phase 1 Data using 'all' ({real_start_time.date()} to {SPLIT_DATE.date()})...")
+                
+                # Load Market and indices
+                loader_all = QlibDataLoader(config=data_fields_qlib)
+                df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
+                
+                loader_filter = QlibDataLoader(config=['$close'])  # Config doesn't matter, we just need the index
+                df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
+                df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
+                
+                # Perform Set Difference: All - (300 U 500)
+                exclude_idx = df_300.index.union(df_500.index)
+                valid_idx = df_all.index.difference(exclude_idx)
+                
+                df_phase1 = df_all.loc[valid_idx]
+                print(f"   -> Phase 1 loaded. Raw: {len(df_all)}, Filtered (Phase 1): {len(df_phase1)}")
+                
+                # --- Phase 2: Load Synthetic CSI2000 using 'csiall' (2011-08-31 -> End) ---
+                df_phase2 = pd.DataFrame()
+                if real_end_time >= SPLIT_DATE:
+                    phase2_start = SPLIT_DATE
+                    print(f"   [Phase 2] Loading Phase 2 Data using 'csiall' ({phase2_start.date()} to {real_end_time.date()})...")
+                    
+                    loader_all = QlibDataLoader(config=data_fields_qlib)
+                    df_all = loader_all.load('csiall', phase2_start, real_end_time)
+                    
+                    loader_filter = QlibDataLoader(config=['$close'])
+                    df_300 = loader_filter.load('csi300', phase2_start, real_end_time)
+                    df_500 = loader_filter.load('csi500', phase2_start, real_end_time)
+                    
+                    # Perform Set Difference: csiall - (300 U 500)
+                    exclude_idx = df_300.index.union(df_500.index)
+                    valid_idx = df_all.index.difference(exclude_idx)
+                    
+                    df_phase2 = df_all.loc[valid_idx]
+                    print(f"   -> Phase 2 loaded. Raw: {len(df_all)}, Filtered (Phase 2): {len(df_phase2)}")
+                
+                # Merge
+                data_df = pd.concat([df_phase1, df_phase2])
+                
+                # Sort to ensure time order (crucial for time-series)
+                data_df = data_df.sort_index()
+            
+            else:
+                # Standard Mode: Load using 'csiall' for entire time range
+                print(f"   -> Standard Mode: Loading synthetic CSI2000 using 'csiall' for entire range.")
+                
+                loader_all = QlibDataLoader(config=data_fields_qlib)
+                df_all = loader_all.load('csiall', real_start_time, real_end_time)
+                
+                loader_filter = QlibDataLoader(config=['$close'])
+                df_300 = loader_filter.load('csi300', real_start_time, real_end_time)
+                df_500 = loader_filter.load('csi500', real_start_time, real_end_time)
+                
+                # Perform Set Difference: csiall - (300 U 500)
+                exclude_idx = df_300.index.union(df_500.index)
+                valid_idx = df_all.index.difference(exclude_idx)
+                
+                data_df = df_all.loc[valid_idx]
+                print(f"   -> CSI2000 loaded. Raw: {len(df_all)}, Filtered (CSI2000): {len(data_df)}")
 
         else:
             # Standard Loading Logic (Original)
@@ -174,8 +245,12 @@ class QlibDataPreprocessor:
 
 
 if __name__ == '__main__':
-    # This block allows the script to be run directly to perform data preprocessing.
-    preprocessor = QlibDataPreprocessor()
+    # Usage: python qlib_data_preprocess.py --config path/to/config.yaml
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True, help="Path to YAML config file (required)")
+    args = parser.parse_args()
+
+    preprocessor = QlibDataPreprocessor(config_path=args.config)
     preprocessor.initialize_qlib()
     preprocessor.load_qlib_data()
     preprocessor.prepare_dataset()
