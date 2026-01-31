@@ -1,4 +1,4 @@
-import os
+﻿import os
 import pickle
 import argparse
 import numpy as np
@@ -31,7 +31,7 @@ class QlibDataPreprocessor:
     def load_qlib_data(self):
         """
         Loads raw data from Qlib, processes it symbol by symbol, and stores
-        it in the `self.data` attribute.
+        it in the self.data attribute.
         """
         print("Loading and processing data from Qlib...")
         data_fields_qlib = ['$' + f for f in self.data_fields]
@@ -63,7 +63,7 @@ class QlibDataPreprocessor:
         
         # Trigger Condition: Instrument is csi1000 AND start time is before the official release
         if self.config.instrument == 'csi1000' and real_start_time < SPLIT_DATE:
-            print("⚠️ Detected request for CSI1000 prior to 2014.")
+            print(" Detected request for CSI1000 prior to 2014.")
             print("   -> Activating Hybrid Mode: splicing 'Proxy (Market-300-500)' and 'Real CSI1000'.")
 
             # Phase 1 ends exactly at SPLIT_DATE (to ensure clean cutoff)
@@ -75,7 +75,7 @@ class QlibDataPreprocessor:
             loader_all = QlibDataLoader(config=data_fields_qlib)
             df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
             
-            loader_filter = QlibDataLoader(config=['$close']) # Config doesn't matter, we just need the index
+            loader_filter = QlibDataLoader(config=['']) # Config doesn't matter, we just need the index
             df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
             df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
             
@@ -100,15 +100,17 @@ class QlibDataPreprocessor:
             
             # Sort to ensure time order (crucial for time-series)
             data_df = data_df.sort_index()
+            
+            # Remove only true duplicates: rows that are completely identical
+            # Keep all distinct (datetime, symbol, field, value) combinations
+            data_df = data_df[~data_df.duplicated(keep='first')]
 
         elif self.config.instrument == 'csi2000':
-            print("⚠️ Detected request for CSI2000.")
+            print(" Detected request for CSI2000.")
             print("   -> Activating Hybrid Mode: splicing 'all - (csi300 U csi500)' and 'csiall - (csi300 U csi500)'.")
             
             # Define splice point: earliest date in csiall
             SPLIT_DATE = pd.Timestamp("2011-08-31")
-            
-            data_df = None
             
             # Trigger Condition: start time is before csiall official release
             if real_start_time < SPLIT_DATE:
@@ -120,7 +122,7 @@ class QlibDataPreprocessor:
                 loader_all = QlibDataLoader(config=data_fields_qlib)
                 df_all = loader_all.load('all', real_start_time, SPLIT_DATE)
                 
-                loader_filter = QlibDataLoader(config=['$close'])  # Config doesn't matter, we just need the index
+                loader_filter = QlibDataLoader(config=[''])  # Config doesn't matter, we just need the index
                 df_300 = loader_filter.load('csi300', real_start_time, SPLIT_DATE)
                 df_500 = loader_filter.load('csi500', real_start_time, SPLIT_DATE)
                 
@@ -140,7 +142,7 @@ class QlibDataPreprocessor:
                     loader_all = QlibDataLoader(config=data_fields_qlib)
                     df_all = loader_all.load('csiall', phase2_start, real_end_time)
                     
-                    loader_filter = QlibDataLoader(config=['$close'])
+                    loader_filter = QlibDataLoader(config=[''])
                     df_300 = loader_filter.load('csi300', phase2_start, real_end_time)
                     df_500 = loader_filter.load('csi500', phase2_start, real_end_time)
                     
@@ -151,11 +153,15 @@ class QlibDataPreprocessor:
                     df_phase2 = df_all.loc[valid_idx]
                     print(f"   -> Phase 2 loaded. Raw: {len(df_all)}, Filtered (Phase 2): {len(df_phase2)}")
                 
-                # Merge
+                # Merge both phases
                 data_df = pd.concat([df_phase1, df_phase2])
                 
                 # Sort to ensure time order (crucial for time-series)
                 data_df = data_df.sort_index()
+                
+                # Remove only true duplicates: rows that are completely identical
+                # Keep all distinct (datetime, symbol, field, value) combinations
+                data_df = data_df[~data_df.duplicated(keep='first')]
             
             else:
                 # Standard Mode: Load using 'csiall' for entire time range
@@ -164,7 +170,7 @@ class QlibDataPreprocessor:
                 loader_all = QlibDataLoader(config=data_fields_qlib)
                 df_all = loader_all.load('csiall', real_start_time, real_end_time)
                 
-                loader_filter = QlibDataLoader(config=['$close'])
+                loader_filter = QlibDataLoader(config=[''])
                 df_300 = loader_filter.load('csi300', real_start_time, real_end_time)
                 df_500 = loader_filter.load('csi500', real_start_time, real_end_time)
                 
@@ -174,6 +180,9 @@ class QlibDataPreprocessor:
                 
                 data_df = df_all.loc[valid_idx]
                 print(f"   -> CSI2000 loaded. Raw: {len(df_all)}, Filtered (CSI2000): {len(data_df)}")
+                
+                # Remove only true duplicates
+                data_df = data_df[~data_df.duplicated(keep='first')]
 
         else:
             # Standard Loading Logic (Original)
@@ -181,6 +190,7 @@ class QlibDataPreprocessor:
             data_df = QlibDataLoader(config=data_fields_qlib).load(
                 self.config.instrument, real_start_time, real_end_time
             )
+        
         data_df = data_df.stack().unstack(level=1)  # Reshape for easier access.
 
         symbol_list = list(data_df.columns)
@@ -191,7 +201,7 @@ class QlibDataPreprocessor:
             # Pivot the table to have features as columns and datetime as index.
             symbol_df = symbol_df.reset_index().rename(columns={'level_1': 'field'})
             symbol_df = pd.pivot(symbol_df, index='datetime', columns='field', values=symbol)
-            symbol_df = symbol_df.rename(columns={f'${field}': field for field in self.data_fields})
+            symbol_df = symbol_df.rename(columns={f'$' + field: field for field in self.data_fields})
 
             # Calculate amount and select final features.
             symbol_df['volume'] = symbol_df['volume']  # Keep volume as-is
@@ -254,4 +264,3 @@ if __name__ == '__main__':
     preprocessor.initialize_qlib()
     preprocessor.load_qlib_data()
     preprocessor.prepare_dataset()
-
