@@ -304,6 +304,3 @@ def run_rolling_system():
 
 if __name__ == "__main__":
     run_rolling_system()
-
-if __name__ == "__main__":
-    run_rolling_system()
